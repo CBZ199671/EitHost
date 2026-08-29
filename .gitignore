@@ -1,0 +1,46 @@
+bin/
+obj/
+.vs/
+.vscode/
+TestResults/
+*.user
+*.suo
+*.nupkg
+*.h5
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+*.tmp
+artifacts/
+data/
+exports/
+outputs/
+
+# Scratch / caches
+.ruff_cache/
+tmp/
+
+# IDE / OS state
+.idea/
+.fleet/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Test and profiling output
+coverage/
+coverage.*
+*.coverage
+*.coveragexml
+*.trx
+BenchmarkDotNet.Artifacts/

@@ -1,0 +1,37 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AnalysisModeReliability>All</AnalysisModeReliability>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="HDF.PInvoke"
+                      Version="1.10.11"
+                      GeneratePathProperty="true"
+                      ExcludeAssets="build" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+    <PackageReference Include="PureHDF" Version="2.2.0" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
+    <PackageReference Include="System.IO.Ports" Version="10.0.9" />
+    <PackageReference Include="System.Management" Version="10.0.9" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="HDF.PInvoke">
+      <HintPath>$(PkgHDF_PInvoke)\lib\HDF.PInvoke.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Content Include="$(PkgHDF_PInvoke)\build\bin64\hdf5.dll"
+             Link="hdf5.dll"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="$(PkgHDF_PInvoke)\build\bin64\hdf5_hl.dll"
+             Link="hdf5_hl.dll"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

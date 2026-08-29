@@ -1,0 +1,11 @@
+{
+  "DistroName": "Ubuntu-22.04",
+  "BackendRepositoryPath": "/home/your-wsl-user/workspace/PyEidors_wsl2",
+  "BackendProfile": "",
+  "UseNixDevelop": false,
+  "NixDevelopProfile": "",
+  "WorkerExecutable": "eit-backend-worker",
+  "WorkerArguments": "serve",
+  "WorkerLaunchCommand": null,
+  "DoctorCommand": null
+}

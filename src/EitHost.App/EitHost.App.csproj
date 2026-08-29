@@ -1,0 +1,31 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\EitHost.Core\EitHost.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Native\x64\USB2070.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          TargetPath="USB2070.dll" />
+    <None Include="..\..\scripts\install-usb2070-driver.ps1"
+          CopyToOutputDirectory="PreserveNewest"
+          TargetPath="scripts\install-usb2070-driver.ps1" />
+    <None Include="..\..\scripts\start-usb2070-driver-install-admin.ps1"
+          CopyToOutputDirectory="PreserveNewest"
+          TargetPath="scripts\start-usb2070-driver-install-admin.ps1" />
+    <None Include="eithost.reconstruction.example.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+  </PropertyGroup>
+
+</Project>

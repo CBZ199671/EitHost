@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/EitHost.App/EitHost.App.csproj" />
+    <Project Path="src/EitHost.Core/EitHost.Core.csproj" />
+  </Folder>
+</Solution>
