@@ -172,14 +172,21 @@ public sealed class DerivedArtifactHdf5Writer
     {
         ArgumentNullException.ThrowIfNull(epoch);
         ArgumentOutOfRangeException.ThrowIfNegative(epoch.LockedStartSampleIndex);
+        if (epoch.NoisePrecisionWeight208 is { Length: not 208 })
+        {
+            throw new ArgumentException("Reference noise precision weights must contain 208 values.", nameof(epoch));
+        }
+
+        var referenceGroup = new H5Group
+        {
+            ["amplitude_208"] = epoch.ReferenceAmplitude208,
+            ["full_real_256"] = epoch.ReferenceFullReal256,
+            ["full_imaginary_256"] = epoch.ReferenceFullImaginary256
+        };
+        AddOptional(referenceGroup, "noise_precision_weight_208", epoch.NoisePrecisionWeight208);
         var file = new H5File
         {
-            ["reference"] = new H5Group
-            {
-                ["amplitude_208"] = epoch.ReferenceAmplitude208,
-                ["full_real_256"] = epoch.ReferenceFullReal256,
-                ["full_imaginary_256"] = epoch.ReferenceFullImaginary256
-            },
+            ["reference"] = referenceGroup,
             ["metadata"] = new H5Group
             {
                 ["run"] = new H5Group

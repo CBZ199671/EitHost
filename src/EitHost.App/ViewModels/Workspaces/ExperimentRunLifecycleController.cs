@@ -88,7 +88,7 @@ internal sealed class ExperimentRunLifecycleController
         }
 
         var match = state.AdaptiveContactProfileMatch;
-        experimentCatalog.SaveRunConfig(new ExperimentRunConfigRecord(
+        var runConfig = new ExperimentRunConfigRecord(
             config.ImagingRunId,
             config.ReconstructionRoute,
             config.DifferenceLambda,
@@ -114,7 +114,13 @@ internal sealed class ExperimentRunLifecycleController
             state.ExecutionReceipt?.EffectiveTimeUs,
             (int)config.AcquisitionSettings.Range,
             Usb2070VoltageScale.GetFullSpanVolts(config.AcquisitionSettings.Range),
-            Usb2070VoltageScale.GetLsbVolts(config.AcquisitionSettings.Range)));
+            Usb2070VoltageScale.GetLsbVolts(config.AcquisitionSettings.Range));
+        experimentCatalog.SaveRunConfig(runConfig);
+        experimentCatalog.SavePipelineManifest(ReconstructionPipelineManifestFactory.CreateRecording(
+            config,
+            state,
+            runConfig,
+            DateTimeOffset.UtcNow));
     }
 
     internal void BeginRun(RealtimeImagingRunConfig config, RealtimeRunState state)
@@ -182,6 +188,7 @@ internal sealed class ExperimentRunLifecycleController
                 rawStatus,
                 demodStatus,
                 reconstructionStatus);
+            FinalizePipelineManifest(config);
             experimentCatalog.EndRun(
                 config.ImagingRunId,
                 DateTimeOffset.UtcNow,
@@ -207,6 +214,35 @@ internal sealed class ExperimentRunLifecycleController
         finally
         {
             callbacks.EndDiagnosticMirror(config.ImagingRunId);
+        }
+    }
+
+    private void FinalizePipelineManifest(RealtimeImagingRunConfig config)
+    {
+        try
+        {
+            var recording = experimentCatalog.GetPipelineManifest(config.ImagingRunId);
+            if (recording is null)
+            {
+                return;
+            }
+
+            var finalized = ReconstructionPipelineManifestFactory.Finalize(
+                recording,
+                experimentCatalog,
+                dataLayout,
+                DateTimeOffset.UtcNow);
+            experimentCatalog.SavePipelineManifest(finalized);
+            callbacks.Diagnostic(
+                $"{config.SetLabel} pipeline manifest {finalized.Status} fingerprint={finalized.AlgorithmFingerprint}" +
+                (string.IsNullOrWhiteSpace(finalized.UnavailableReason)
+                    ? string.Empty
+                    : $" reason={finalized.UnavailableReason}"));
+        }
+        catch (Exception ex)
+        {
+            callbacks.Diagnostic(
+                $"{config.SetLabel} pipeline manifest finalization failed: {ex.Message}; offline-complete disabled");
         }
     }
 

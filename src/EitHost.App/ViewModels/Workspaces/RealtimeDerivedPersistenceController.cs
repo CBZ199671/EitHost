@@ -2,7 +2,6 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using EitHost.Core.Application.Realtime;
@@ -466,6 +465,23 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
             config.ImagingRunId,
             state.ExperimentStartedAt,
             block.BlockNumber);
+        var manifest = catalog.GetPipelineManifest(config.ImagingRunId);
+        if (manifest is null)
+        {
+            diagnostic($"{config.SetLabel} live replay excluded block={block.BlockNumber}: pipeline manifest missing");
+            return null;
+        }
+
+        try
+        {
+            _ = ReconstructionPipelineManifestCodec.ReadPayload(manifest);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or ArgumentException)
+        {
+            diagnostic($"{config.SetLabel} live replay excluded block={block.BlockNumber}: {ex.Message}");
+            return null;
+        }
+
         return new RealtimePersistedLiveFrameEvidence(
             config.SetLabel,
             config.ImagingRunId,
@@ -475,7 +491,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
             block.EndSampleIndex,
             CalculateBlockAcquiredAt(config, state, block),
             processedAt,
-            CreateLiveAlgorithmFingerprint(config, dynamicKalman),
+            manifest.AlgorithmFingerprint,
             dataLayout.ToRelativeArtifactPath(path),
             DataRootLayout.GetDerivedDatasetPath(block.BlockNumber, "/reconstruction"),
             HashDoubles(measurementWeights),
@@ -484,15 +500,6 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
             "updated",
             state.ReferenceEpoch,
             persistenceReady);
-    }
-
-    private static string CreateLiveAlgorithmFingerprint(
-        RealtimeImagingRunConfig config,
-        RealtimeDynamicKalmanOptions dynamicKalman)
-    {
-        var canonical = FormattableString.Invariant(
-            $"live-v1;route={config.ReconstructionRoute};backend={config.BackendProfile};mesh={config.MeshSize:G17};lambda={config.DifferenceLambda:G17};custom={config.CustomLambdaEnabled};orientation={config.DifferenceOrientation};dynamic-policy={config.DynamicKalmanMode};latency={dynamicKalman.UpstreamLatencyFrames};process={dynamicKalman.ProcessNoiseRelativeStd:G17};measurement={dynamicKalman.MeasurementNoiseRelativeStd:G17};initial={dynamicKalman.InitialRelativeStd:G17};decay={dynamicKalman.TransitionDecayPerBlock:G17};gate={dynamicKalman.InnovationGate};nis={dynamicKalman.NisThresholdPerDof:G17};inflation={dynamicKalman.MaxVarianceInflation:G17}");
-        return "sha256:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 
     private static string HashDoubles(IReadOnlyList<double> values)
@@ -733,7 +740,8 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
             WindowSkewMilliseconds: state.ActiveReferenceWindowSkewMilliseconds,
             SwitchSkewMilliseconds: state.ActiveReferenceSwitchSkewMilliseconds,
             SynchronizedSetCount: state.ActiveReferenceSynchronizedSetCount,
-            LockedStartSampleIndex: state.ReferenceStartSampleIndex);
+            LockedStartSampleIndex: state.ReferenceStartSampleIndex,
+            NoisePrecisionWeight208: reference.NoiseModel?.PrecisionWeight208.ToArray());
         try
         {
             var createdAt = DateTimeOffset.UtcNow;

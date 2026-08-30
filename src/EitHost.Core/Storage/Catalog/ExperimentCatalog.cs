@@ -7,7 +7,7 @@ namespace EitHost.Core.Storage.Catalog;
 
 public sealed class ExperimentCatalog
 {
-    public const int CurrentSchemaVersion = 7;
+    public const int CurrentSchemaVersion = 9;
     public const string RecordingStatus = "recording";
     public const string CompletedStatus = "completed";
     public const string InterruptedStatus = "interrupted";
@@ -140,6 +140,18 @@ public sealed class ExperimentCatalog
                 updated_at_utc TEXT NOT NULL,
                 FOREIGN KEY(experiment_run_id) REFERENCES experiment_runs(experiment_run_id)
             );
+            CREATE TABLE IF NOT EXISTS reconstruction_pipeline_manifests (
+                experiment_run_id TEXT PRIMARY KEY,
+                schema_version TEXT NOT NULL,
+                algorithm_fingerprint TEXT NOT NULL,
+                manifest_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL,
+                manifest_json TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                unavailable_reason TEXT NULL,
+                FOREIGN KEY(experiment_run_id) REFERENCES experiment_runs(experiment_run_id)
+            );
             CREATE TABLE IF NOT EXISTS reconstruction_revisions (
                 experiment_run_id TEXT NOT NULL,
                 lane TEXT NOT NULL,
@@ -261,6 +273,11 @@ public sealed class ExperimentCatalog
             "reconstruction_lane_frames",
             "result_hash",
             "TEXT NULL");
+        AddColumnIfMissing(
+            connection,
+            "reconstruction_pipeline_manifests",
+            "manifest_fingerprint",
+            "TEXT NOT NULL DEFAULT ''");
         ExecuteNonQuery(
             connection,
             """
@@ -397,6 +414,79 @@ public sealed class ExperimentCatalog
             : JsonSerializer.Deserialize<ExperimentRunConfigRecord>(json)
               ?? throw new InvalidDataException("Experiment run config JSON is invalid.");
     }
+
+    public void SavePipelineManifest(ReconstructionPipelineManifestCatalogRecord manifest)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+        if (manifest.ExperimentRunId == Guid.Empty ||
+            string.IsNullOrWhiteSpace(manifest.SchemaVersion) ||
+            string.IsNullOrWhiteSpace(manifest.AlgorithmFingerprint) ||
+            string.IsNullOrWhiteSpace(manifest.ManifestFingerprint) ||
+            string.IsNullOrWhiteSpace(manifest.Status) ||
+            string.IsNullOrWhiteSpace(manifest.ManifestJson))
+        {
+            throw new ArgumentException("Pipeline manifest is invalid.", nameof(manifest));
+        }
+
+        using var connection = OpenConnection();
+        ExecuteNonQuery(
+            connection,
+            """
+            INSERT INTO reconstruction_pipeline_manifests(
+                experiment_run_id, schema_version, algorithm_fingerprint, manifest_fingerprint,
+                status, manifest_json, created_at_utc, updated_at_utc, unavailable_reason)
+            VALUES(
+                $experiment_run_id, $schema_version, $algorithm_fingerprint, $manifest_fingerprint,
+                $status, $manifest_json, $created_at_utc, $updated_at_utc, $unavailable_reason)
+            ON CONFLICT(experiment_run_id) DO UPDATE SET
+                schema_version = excluded.schema_version,
+                algorithm_fingerprint = excluded.algorithm_fingerprint,
+                manifest_fingerprint = excluded.manifest_fingerprint,
+                status = excluded.status,
+                manifest_json = excluded.manifest_json,
+                updated_at_utc = excluded.updated_at_utc,
+                unavailable_reason = excluded.unavailable_reason;
+            """,
+            ("$experiment_run_id", manifest.ExperimentRunId.ToString("D")),
+            ("$schema_version", manifest.SchemaVersion),
+            ("$algorithm_fingerprint", manifest.AlgorithmFingerprint),
+            ("$manifest_fingerprint", manifest.ManifestFingerprint),
+            ("$status", manifest.Status),
+            ("$manifest_json", manifest.ManifestJson),
+            ("$created_at_utc", Format(manifest.CreatedAt)),
+            ("$updated_at_utc", Format(manifest.UpdatedAt)),
+            ("$unavailable_reason", manifest.UnavailableReason));
+    }
+
+    public ReconstructionPipelineManifestCatalogRecord? GetPipelineManifest(Guid experimentRunId)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT experiment_run_id, schema_version, algorithm_fingerprint, manifest_fingerprint,
+                   status, manifest_json, created_at_utc, updated_at_utc, unavailable_reason
+            FROM reconstruction_pipeline_manifests
+            WHERE experiment_run_id = $experiment_run_id;
+            """;
+        command.Parameters.AddWithValue("$experiment_run_id", experimentRunId.ToString("D"));
+        using var reader = command.ExecuteReader();
+        return reader.Read()
+            ? new ReconstructionPipelineManifestCatalogRecord(
+                Guid.Parse(reader.GetString(0)),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                Parse(reader.GetString(6)),
+                Parse(reader.GetString(7)),
+                reader.IsDBNull(8) ? null : reader.GetString(8))
+            : null;
+    }
+
+    public OfflinePipelineReadiness GetOfflinePipelineReadiness(Guid experimentRunId) =>
+        ReconstructionPipelineManifestCodec.EvaluateForOffline(GetPipelineManifest(experimentRunId));
 
     public void UpsertReconstructionRevision(ReconstructionRevisionCatalogRecord revision)
     {
@@ -1589,6 +1679,7 @@ public sealed class ExperimentCatalog
                      "derived_artifacts",
                      "processing_blocks",
                      "raw_segments",
+                     "reconstruction_pipeline_manifests",
                      "experiment_run_configs"
                  })
         {

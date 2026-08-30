@@ -1644,7 +1644,8 @@ public sealed record ImagingReferenceEpochRecord(
     double? WindowSkewMilliseconds = null,
     double? SwitchSkewMilliseconds = null,
     int SynchronizedSetCount = 1,
-    long LockedStartSampleIndex = -1);
+    long LockedStartSampleIndex = -1,
+    double[]? NoisePrecisionWeight208 = null);
 
 public sealed record ImagingReferenceCandidateRecord(
     Guid ImagingRunId,
