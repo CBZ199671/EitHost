@@ -10,7 +10,16 @@
 2. 将整个 `EitHost-Windows-x64` 目录解压到具有写入权限的位置。
 3. 双击 `EitHost.App.exe`。
 
-请勿直接在压缩包内运行，也不要只复制 `.exe`。程序需要同目录中的 `USB2070.dll` 和其余配置文件。运行数据默认写入此目录下的 `Data` 文件夹。
+请勿直接在压缩包内运行，也不要只复制 `.exe`。最小运行文件必须保持在同一目录：
+
+- `EitHost.App.exe`
+- `HDF.PInvoke.dll`
+- `HDF.PInvoke.dll.config`
+- `hdf5.dll`
+- `hdf5_hl.dll`
+- `USB2070.dll`
+
+程序每次启动都会先创建、写入、关闭并删除一个临时 HDF5 文件；运行库不完整时会在打开硬件前明确退出，不会采集一段时间后才停止。运行数据默认写入此目录下的 `Data` 文件夹。
 
 `scripts` 目录中的脚本只用于从本机已有的厂商驱动文件执行安装或修复；本发布包不包含驱动安装包。
 
@@ -22,9 +31,11 @@
 
 ## 文件校验
 
-`SHA256SUMS.txt` 记录主程序和厂商运行库的 SHA-256。可在 PowerShell 中执行：
+`SHA256SUMS.txt` 记录发布目录全部文件的 SHA-256。可在 PowerShell 中执行：
 
 ```powershell
 Get-FileHash .\EitHost.App.exe -Algorithm SHA256
+Get-FileHash .\HDF.PInvoke.dll -Algorithm SHA256
+Get-FileHash .\hdf5.dll -Algorithm SHA256
 Get-FileHash .\USB2070.dll -Algorithm SHA256
 ```

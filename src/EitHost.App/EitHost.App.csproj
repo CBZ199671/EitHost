@@ -7,15 +7,19 @@
   <ItemGroup>
     <None Include="Native\x64\USB2070.dll"
           CopyToOutputDirectory="PreserveNewest"
-          TargetPath="USB2070.dll" />
+          TargetPath="USB2070.dll"
+          ExcludeFromSingleFile="true" />
     <None Include="..\..\scripts\install-usb2070-driver.ps1"
           CopyToOutputDirectory="PreserveNewest"
-          TargetPath="scripts\install-usb2070-driver.ps1" />
+          TargetPath="scripts\install-usb2070-driver.ps1"
+          ExcludeFromSingleFile="true" />
     <None Include="..\..\scripts\start-usb2070-driver-install-admin.ps1"
           CopyToOutputDirectory="PreserveNewest"
-          TargetPath="scripts\start-usb2070-driver-install-admin.ps1" />
+          TargetPath="scripts\start-usb2070-driver-install-admin.ps1"
+          ExcludeFromSingleFile="true" />
     <None Include="eithost.reconstruction.example.json"
-          CopyToOutputDirectory="PreserveNewest" />
+          CopyToOutputDirectory="PreserveNewest"
+          ExcludeFromSingleFile="true" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -27,5 +31,16 @@
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
   </PropertyGroup>
+
+  <Target Name="KeepHdfPInvokeExternalFromSingleFile"
+          BeforeTargets="_ComputeFilesToBundle"
+          Condition="'$(PublishSingleFile)' == 'true'">
+    <ItemGroup>
+      <ResolvedFileToPublish Update="@(ResolvedFileToPublish)"
+                             Condition="'%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'HDF.PInvoke.dll' or '%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'HDF.PInvoke.dll.config'">
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
 
 </Project>

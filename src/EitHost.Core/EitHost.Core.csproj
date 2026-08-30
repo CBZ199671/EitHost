@@ -27,11 +27,13 @@
     <Content Include="$(PkgHDF_PInvoke)\build\bin64\hdf5.dll"
              Link="hdf5.dll"
              CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest" />
+             CopyToPublishDirectory="PreserveNewest"
+             ExcludeFromSingleFile="true" />
     <Content Include="$(PkgHDF_PInvoke)\build\bin64\hdf5_hl.dll"
              Link="hdf5_hl.dll"
              CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest" />
+             CopyToPublishDirectory="PreserveNewest"
+             ExcludeFromSingleFile="true" />
   </ItemGroup>
 
 </Project>

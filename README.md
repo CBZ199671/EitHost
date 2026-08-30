@@ -73,7 +73,7 @@ While the associated research manuscript is being prepared, the PyEIDORS v2 sour
 .\release\EitHost-Windows-x64\EitHost.App.exe
 ```
 
-Do not copy only the `.exe`. The application requires the configuration and runtime files stored beside it. The repository includes the x64 `USB2070.dll` needed by the GUI, but it does not include the USB2070 kernel-driver package.
+Do not copy only the `.exe`. The application requires `HDF.PInvoke.dll`, `HDF.PInvoke.dll.config`, `hdf5.dll`, `hdf5_hl.dll`, and `USB2070.dll` beside it. Startup performs a real HDF5 create/write/close/delete probe before hardware can open. The repository does not include the USB2070 kernel-driver package.
 
 See [`release/EitHost-Windows-x64/README.md`](release/EitHost-Windows-x64/README.md) for package usage and SHA-256 verification instructions.
 

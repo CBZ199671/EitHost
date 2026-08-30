@@ -73,7 +73,7 @@ PyEIDORS v2 是下一代重大版本，包含大量新增能力、架构改进�
 .\release\EitHost-Windows-x64\EitHost.App.exe
 ```
 
-不要只复制单个 `.exe`。程序需要同目录中的配置和运行库。仓库提供 GUI 所需的 x64 `USB2070.dll`，但不包含 USB2070 内核驱动安装包。
+不要只复制单个 `.exe`。程序需要同目录中的 `HDF.PInvoke.dll`、`HDF.PInvoke.dll.config`、`hdf5.dll`、`hdf5_hl.dll` 和 `USB2070.dll`。启动时会在打开硬件前真实执行一次 HDF5 创建、写入、关闭和删除探针。仓库不包含 USB2070 内核驱动安装包。
 
 发布文件的使用方法与 SHA-256 校验说明见 [`release/EitHost-Windows-x64/README.md`](release/EitHost-Windows-x64/README.md)。
 
