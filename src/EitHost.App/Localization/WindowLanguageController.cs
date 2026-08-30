@@ -17,6 +17,8 @@ internal sealed class WindowLanguageController : IDisposable
     private readonly Dictionary<DependencyObject, ElementRegistration> registrations =
         new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<UIElement> externalScopes = new(ReferenceEqualityComparer.Instance);
+    private readonly List<PropertyRegistration> pendingApplications = [];
+    private int attachDepth;
     private bool applying;
     private bool disposed;
 
@@ -116,39 +118,68 @@ internal sealed class WindowLanguageController : IDisposable
         AttachSubtree(subtreeRoot);
     }
 
+    // Registration and translation are two passes on purpose: a template part
+    // mirrors the value of the element it was generated for, so translating the
+    // owner while the walk is still running would let the part record the
+    // translation as its own source and strand it there on the way back.
     private void AttachSubtree(DependencyObject subtreeRoot)
     {
-        var pending = new Stack<DependencyObject>();
-        var visited = new HashSet<DependencyObject>(ReferenceEqualityComparer.Instance);
-        pending.Push(subtreeRoot);
-
-        while (pending.Count > 0)
+        attachDepth++;
+        try
         {
-            var current = pending.Pop();
-            if (!visited.Add(current))
-            {
-                continue;
-            }
+            var pending = new Stack<DependencyObject>();
+            var visited = new HashSet<DependencyObject>(ReferenceEqualityComparer.Instance);
+            pending.Push(subtreeRoot);
 
-            AttachElement(current);
-
-            try
+            while (pending.Count > 0)
             {
-                var visualChildren = VisualTreeHelper.GetChildrenCount(current);
-                for (var index = 0; index < visualChildren; index++)
+                var current = pending.Pop();
+                if (!visited.Add(current))
                 {
-                    pending.Push(VisualTreeHelper.GetChild(current, index));
+                    continue;
+                }
+
+                AttachElement(current);
+
+                try
+                {
+                    var visualChildren = VisualTreeHelper.GetChildrenCount(current);
+                    for (var index = 0; index < visualChildren; index++)
+                    {
+                        pending.Push(VisualTreeHelper.GetChild(current, index));
+                    }
+                }
+                catch (InvalidOperationException)
+                {
+                    // Content elements do not participate in the visual tree.
+                }
+
+                foreach (var child in LogicalTreeHelper.GetChildren(current).OfType<DependencyObject>())
+                {
+                    pending.Push(child);
                 }
             }
-            catch (InvalidOperationException)
-            {
-                // Content elements do not participate in the visual tree.
-            }
+        }
+        finally
+        {
+            attachDepth--;
+        }
 
-            foreach (var child in LogicalTreeHelper.GetChildren(current).OfType<DependencyObject>())
-            {
-                pending.Push(child);
-            }
+        FlushPendingApplications();
+    }
+
+    private void FlushPendingApplications()
+    {
+        if (attachDepth > 0 || pendingApplications.Count == 0)
+        {
+            return;
+        }
+
+        var scheduled = pendingApplications.ToArray();
+        pendingApplications.Clear();
+        foreach (var registration in scheduled)
+        {
+            Apply(registration);
         }
     }
 
@@ -350,16 +381,73 @@ internal sealed class WindowLanguageController : IDisposable
             return;
         }
 
-        var initial = element.Owner.GetValue(property);
+        var initial = element.Owner.GetValue(property) as string;
         var propertyRegistration = new PropertyRegistration(
             element.Owner,
             property,
             descriptor,
-            initial as string,
+            ResolveSourceText(element.Owner, initial),
             OnTargetPropertyChanged);
         element.Properties.Add(propertyRegistration);
         propertyRegistration.Attach();
+        if (attachDepth > 0)
+        {
+            pendingApplications.Add(propertyRegistration);
+            return;
+        }
+
         Apply(propertyRegistration);
+    }
+
+    // A template part realized after its owner was already translated starts out
+    // holding English. Recording that as the source would pin it to English for
+    // good, so the owner's own untranslated text is adopted instead.
+    private string? ResolveSourceText(DependencyObject owner, string? current)
+    {
+        if (current is null
+            || CurrentLanguage == UiLanguage.SimplifiedChinese
+            || EnglishUiText.ContainsChinese(current))
+        {
+            return current;
+        }
+
+        var ancestor = GetLayoutParent(owner);
+        for (var depth = 0; depth < 6 && ancestor is not null; depth++)
+        {
+            if (registrations.TryGetValue(ancestor, out var registration))
+            {
+                foreach (var property in registration.Properties)
+                {
+                    if (property.SourceText is { } source
+                        && EnglishUiText.ContainsChinese(source)
+                        && string.Equals(EnglishUiText.Translate(source), current, StringComparison.Ordinal))
+                    {
+                        return source;
+                    }
+                }
+            }
+
+            ancestor = GetLayoutParent(ancestor);
+        }
+
+        return current;
+    }
+
+    private static DependencyObject? GetLayoutParent(DependencyObject element)
+    {
+        if (element is FrameworkElement { TemplatedParent: { } templatedParent })
+        {
+            return templatedParent;
+        }
+
+        try
+        {
+            return VisualTreeHelper.GetParent(element);
+        }
+        catch (InvalidOperationException)
+        {
+            return LogicalTreeHelper.GetParent(element);
+        }
     }
 
     private void OnTargetPropertyChanged(PropertyRegistration registration)

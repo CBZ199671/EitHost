@@ -272,6 +272,16 @@ internal sealed class ExperimentRunLifecycleController
     internal OfflineCompletePreflight PreflightOfflineComplete(Guid experimentRunId) =>
         offlineCompleteService.Preflight(experimentRunId);
 
+    internal OfflineRevisionDeletionReport DeleteOfflineCompleteRevision(
+        Guid experimentRunId,
+        string revisionId)
+    {
+        using var operationLease = operationGate.Enter(
+            experimentRunId,
+            ExperimentRunOperation.Delete);
+        return offlineCompleteService.DeleteRevision(experimentRunId, revisionId);
+    }
+
     private async Task RunCatchUpAsync(
         Guid experimentRunId,
         string setLabel,

@@ -202,6 +202,10 @@ internal sealed class RoiInteractionController : IDisposable
     {
         if (workspace.RoiMode == FixedNominalMode && GetCurrentFixedExportSource() is { } fixedSource)
         {
+            var isReplayExport = string.Equals(
+                fixedSource.Source,
+                replay.ReplayExportSource,
+                StringComparison.Ordinal);
             var defaultPath = CreateDefaultPath(fixedSource.Source);
             if (callbacks.PromptSaveFile(defaultPath, "CSV 文件 (*.csv)|*.csv|所有文件 (*.*)|*.*", ".csv") is not { } path)
             {
@@ -210,7 +214,12 @@ internal sealed class RoiInteractionController : IDisposable
 
             File.WriteAllText(
                 path,
-                RoiCsvExporter.BuildFixedTemporal(workspace.FixedRoiGrid, fixedSource.SetLabel, fixedSource.Analyses),
+                RoiCsvExporter.BuildFixedTemporal(
+                    workspace.FixedRoiGrid,
+                    fixedSource.SetLabel,
+                    fixedSource.Analyses,
+                    isReplayExport ? replay.ReplayLane : null,
+                    isReplayExport ? replay.ReplayRevisionId : null),
                 Encoding.UTF8);
             var rows = fixedSource.Analyses.Sum(item => item.Frames.Count) * workspace.FixedRoiGrid.Cells.Count;
             callbacks.PublishStatus($"固定 ROI 时空长表已保存：{path}");
@@ -231,7 +240,14 @@ internal sealed class RoiInteractionController : IDisposable
             return;
         }
 
-        File.WriteAllText(csvPath, RoiCsvExporter.BuildCurve(series), Encoding.UTF8);
+        var isReplayCurve = replay.RoiSeries.Count > 0;
+        File.WriteAllText(
+            csvPath,
+            RoiCsvExporter.BuildCurve(
+                series,
+                isReplayCurve ? replay.ReplayLane : null,
+                isReplayCurve ? replay.ReplayRevisionId : null),
+            Encoding.UTF8);
         callbacks.PublishStatus($"ROI 曲线已保存：{csvPath}");
         callbacks.LogExport($"{DateTime.Now:HH:mm:ss} ROI curve saved {series.Count} rows {csvPath}");
     }
@@ -271,7 +287,10 @@ internal sealed class RoiInteractionController : IDisposable
     {
         if (replay.FixedRoiAnalyses.Count > 0)
         {
-            return new FixedRoiTemporalExportSource(replay.ReplaySetLabel, "replay", replay.FixedRoiAnalyses);
+            return new FixedRoiTemporalExportSource(
+                replay.ReplaySetLabel,
+                replay.ReplayExportSource,
+                replay.FixedRoiAnalyses);
         }
 
         var samples = GetSelectedRealtimeFixedSamples();
@@ -290,7 +309,7 @@ internal sealed class RoiInteractionController : IDisposable
     private (IReadOnlyList<RoiCurvePoint> Series, string Source) GetCurrentSeriesForSave()
     {
         return replay.RoiSeries.Count > 0
-            ? (replay.RoiSeries, "replay")
+            ? (replay.RoiSeries, replay.ReplayExportSource)
             : (GetSelectedRealtimeSeries(), callbacks.SelectedSetLabel() ?? "realtime");
     }
 

@@ -103,6 +103,9 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
         ReconcileSelectedExperimentCommand = new RelayCommand(
             ReconcileSelectedExperiment,
             CanReconcileSelectedExperiment);
+        DeleteOfflineCompleteRevisionCommand = new AsyncRelayCommand(
+            DeleteOfflineCompleteRevisionAsync,
+            CanDeleteOfflineCompleteRevision);
         CancelCatchUpCommand = new RelayCommand(
             () => RunLifecycleController.CancelCatchUp(),
             () => IsCatchUpRunning);
@@ -292,11 +295,13 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
 
     public RelayCommand ReconcileSelectedExperimentCommand { get; }
 
+    public AsyncRelayCommand DeleteOfflineCompleteRevisionCommand { get; }
+
     public RelayCommand CancelCatchUpCommand { get; }
 
     /// <summary>
-    /// Offline catch-up runs after every stopped experiment and can take minutes on a long run.
-    /// Empty while idle so the indicator only occupies the panel while work is in flight.
+    /// The manual offline-complete job can take minutes on a long run. Empty while idle so the
+    /// indicator only occupies the panel while operator-requested work is in flight.
     /// </summary>
     public string CatchUpProgressSummary
     {
@@ -309,6 +314,7 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
                 CancelCatchUpCommand.RaiseCanExecuteChanged();
                 ArchiveSelectedExperimentCommand.RaiseCanExecuteChanged();
                 DeleteSelectedExperimentCommand.RaiseCanExecuteChanged();
+                DeleteOfflineCompleteRevisionCommand.RaiseCanExecuteChanged();
                 ArchiveRetentionCandidatesCommand.RaiseCanExecuteChanged();
             }
         }
@@ -594,6 +600,13 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
     private bool CanReconcileSelectedExperiment()
     {
         return selectedExperimentRun is { IsLegacy: false, Run: { } run } &&
+               IsTerminalExperimentRun(run);
+    }
+
+    private bool CanDeleteOfflineCompleteRevision()
+    {
+        return !IsCatchUpRunning &&
+               selectedExperimentRun is { IsLegacy: false, Run: { } run } &&
                IsTerminalExperimentRun(run);
     }
 
@@ -953,6 +966,71 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
         UpdateStatus($"{run.SetLabel} 已进入离线完整重算队列：暂存完成并校验后才会发布。", "processing");
     }
 
+    private async Task DeleteOfflineCompleteRevisionAsync()
+    {
+        if (IsCatchUpRunning)
+        {
+            UpdateStatus(LifecycleCatchUpBusyMessage, "warning");
+            return;
+        }
+
+        if (selectedExperimentRun?.Run is not { } run || !IsTerminalExperimentRun(run))
+        {
+            UpdateStatus("请选择包含离线 revision 的终态统一实验。", "unavailable");
+            return;
+        }
+
+        var revision = await Task.Run(() =>
+                experimentCatalog.GetPublishedReconstructionRevision(
+                    run.ExperimentRunId,
+                    ReconstructionLane.OfflineComplete) ??
+                experimentCatalog.ListReconstructionRevisions(
+                        run.ExperimentRunId,
+                        ReconstructionLane.OfflineComplete)
+                    .OrderByDescending(item => item.UpdatedAt)
+                    .FirstOrDefault())
+            .ConfigureAwait(true);
+        if (revision is null)
+        {
+            UpdateStatus($"{run.SetLabel} 没有可删除的离线 revision。", "unavailable");
+            return;
+        }
+
+        var message =
+            $"实验：{run.SetLabel}\n离线 revision：{revision.RevisionId}\n状态：{revision.Status}\n\n" +
+            "仅删除这个离线 revision 的重构结果、展示参数和索引；raw、解调数据、实时回放及其他 revision 均保持不变。是否继续？";
+        if (!lifecycleConfirmation("删除离线版本", message))
+        {
+            UpdateStatus("已取消删除离线版本。", "idle");
+            return;
+        }
+
+        try
+        {
+            var report = await Task.Run(() =>
+                    RunLifecycleController.DeleteOfflineCompleteRevision(
+                        run.ExperimentRunId,
+                        revision.RevisionId))
+                .ConfigureAwait(true);
+            ReplaceExperimentRunsFromCurrentSources();
+            SelectionChanged?.Invoke(SelectedExperimentRun);
+            await RefreshDataRootStorageAsync(updateStatusMessage: false).ConfigureAwait(true);
+            UpdateStatus(
+                report.CleanupComplete
+                    ? $"离线版本已删除：{revision.RevisionId}；实时回放和共享原始数据未改变。"
+                    : $"离线版本索引已删除，但残留文件保留于 {report.RecoveryDirectory}：{report.CleanupError}",
+                report.CleanupComplete ? "ready" : "warning");
+        }
+        catch (Exception ex)
+        {
+            UpdateStatus(
+                ex is ExperimentRunOperationConflictException
+                    ? LifecycleCatchUpBusyMessage
+                    : $"删除离线版本失败；原 revision 保持不变：{ex.Message}",
+                ex is ExperimentRunOperationConflictException ? "warning" : "error");
+        }
+    }
+
     private IReadOnlyList<EitCatalogRunSummary> LoadLegacyRecentRuns()
     {
         if (legacyRunLoader is not null)
@@ -1145,6 +1223,7 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
     private void RefreshSelectionCommands()
     {
         ReconcileSelectedExperimentCommand.RaiseCanExecuteChanged();
+        DeleteOfflineCompleteRevisionCommand.RaiseCanExecuteChanged();
         OpenSelectedExperimentDirectoryCommand.RaiseCanExecuteChanged();
         ArchiveSelectedExperimentCommand.RaiseCanExecuteChanged();
         DeleteSelectedExperimentCommand.RaiseCanExecuteChanged();

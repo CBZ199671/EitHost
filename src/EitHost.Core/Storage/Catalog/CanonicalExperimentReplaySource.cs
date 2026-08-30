@@ -51,6 +51,15 @@ public sealed class CanonicalExperimentReplaySource
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
     }
 
+    public ReconstructionRevisionCatalogRecord? GetPublishedReconstructionRevision(
+        Guid imagingRunId,
+        string lane) => catalog.GetPublishedReconstructionRevision(imagingRunId, lane);
+
+    public ReconstructionLaneReplaySource OpenPublishedReconstructionLane(
+        Guid imagingRunId,
+        string lane,
+        string revisionId) => new(layout, catalog, this, imagingRunId, lane, revisionId);
+
     public ImagingRunDetail? GetImagingRunDetail(Guid imagingRunId)
     {
         var run = catalog.GetRun(imagingRunId);

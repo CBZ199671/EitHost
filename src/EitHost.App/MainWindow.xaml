@@ -1924,15 +1924,18 @@
                                                         Visibility="{Binding RealtimeReferenceInvalidatedVisibility}"
                                                         Background="#99000000"
                                                         IsHitTestVisible="False">
-                                                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                                                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                                Margin="14,0">
                                                         <TextBlock Text="参考帧失效"
                                                                    FontSize="28" FontWeight="Bold"
                                                                    Foreground="#fff7ed"
+                                                                   TextWrapping="Wrap" TextAlignment="Center"
                                                                    HorizontalAlignment="Center" />
                                                         <TextBlock Text="请重锁参考"
                                                                    FontSize="15"
                                                                    Foreground="#fed7aa"
                                                                    Margin="0,6,0,0"
+                                                                   TextWrapping="Wrap" TextAlignment="Center"
                                                                    HorizontalAlignment="Center" />
                                                     </StackPanel>
                                                 </Border>
@@ -1941,15 +1944,18 @@
                                                          Visibility="{Binding RealtimeLowConfidenceImageVisibility}"
                                                          Background="#26000000"
                                                          IsHitTestVisible="False">
-                                                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                                                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                                Margin="14,0">
                                                         <TextBlock Text="低置信度重构"
                                                                    FontSize="24" FontWeight="Bold"
                                                                    Foreground="#fef3c7"
+                                                                   TextWrapping="Wrap" TextAlignment="Center"
                                                                    HorizontalAlignment="Center" />
                                                         <TextBlock Text="图像仅供参考"
                                                                    FontSize="14"
                                                                    Foreground="#fde68a"
                                                                    Margin="0,6,0,0"
+                                                                   TextWrapping="Wrap" TextAlignment="Center"
                                                                    HorizontalAlignment="Center" />
                                                     </StackPanel>
                                                 </Border>
@@ -2255,6 +2261,7 @@
                                             MinHeight="34" Margin="0,8,0,0" Padding="6,5" />
                                     <Expander x:Name="RealtimeReferenceHistoryExpander"
                                               Header="高级：选择历史参考区间"
+                                              HeaderTemplate="{StaticResource WrappedHeaderLabel}"
                                               IsExpanded="False"
                                               Visibility="{Binding RealtimeReferenceWindowSelectorVisibility}"
                                               Margin="0,7,0,0">
@@ -2388,12 +2395,12 @@
                                 DataContext="{Binding ExperimentWorkspace}">
                             <DockPanel LastChildFill="True" Margin="18">
                                 <DockPanel DockPanel.Dock="Top" LastChildFill="False">
+                                    <Button DockPanel.Dock="Right" Content="刷新" Command="{Binding RefreshCatalogRunsCommand}"
+                                            Style="{StaticResource SubtleButton}" Height="32" MinWidth="64" VerticalAlignment="Center" />
                                     <StackPanel DockPanel.Dock="Left">
                                         <TextBlock Text="eit_catalog.sqlite · catalog-v2" Style="{StaticResource EyebrowText}" />
                                         <TextBlock Text="实验数据与回放" Style="{StaticResource H3Text}" Margin="0,2,0,0" />
                                     </StackPanel>
-                                    <Button DockPanel.Dock="Right" Content="刷新" Command="{Binding RefreshCatalogRunsCommand}"
-                                            Style="{StaticResource SubtleButton}" Height="32" MinWidth="64" VerticalAlignment="Center" />
                                 </DockPanel>
                                 <TextBlock DockPanel.Dock="Top" Text="一条实验统一显示 raw、解调、重构及回放覆盖；选择后自动关联离线工具和下方回放。旧数据只读显示且不会伪造关联。"
                                            Style="{StaticResource HintText}" Margin="0,8,0,0" />
@@ -2446,32 +2453,44 @@
                                         </Grid>
                                     </StackPanel>
                                 </Border>
-                                <DockPanel DockPanel.Dock="Top" LastChildFill="False" Margin="0,12,0,0">
-                                    <TextBlock DockPanel.Dock="Left" Text="按日期" Style="{StaticResource FieldLabel}"
-                                               VerticalAlignment="Center" Margin="0,0,8,0" />
-                                    <DatePicker DockPanel.Dock="Left" Width="150" SelectedDate="{Binding SelectedRunDate}"
-                                                VerticalAlignment="Center" />
-                                    <Button DockPanel.Dock="Left" Content="清除" Command="{Binding ClearRunDateFilterCommand}"
-                                            Style="{StaticResource SubtleButton}" Height="32" MinWidth="56" Margin="8,0,0,0"
-                                            VerticalAlignment="Center" />
-                                    <Button DockPanel.Dock="Left" Content="补齐所选" Command="{Binding ReconcileSelectedExperimentCommand}"
-                                            Height="32" MinWidth="80" Margin="8,0,0,0" VerticalAlignment="Center"
-                                            ToolTip="按处理账本补齐缺失解调与参考锁定后的待重构块；重复执行不会重复写入" />
-                                    <Button x:Name="CancelCatchUpButton" DockPanel.Dock="Left" Content="停止追赶"
-                                            Command="{Binding CancelCatchUpCommand}"
-                                            Style="{StaticResource SubtleButton}"
-                                            Height="32" MinWidth="80" Margin="8,0,0,0" VerticalAlignment="Center"
-                                            Visibility="{Binding IsCatchUpRunning, Converter={StaticResource BoolToVis}}"
-                                            ToolTip="在当前块结束后停止；已完成的块保持不变，未处理部分仍标记为待处理" />
-                                    <TextBlock x:Name="CatchUpProgressText" DockPanel.Dock="Left"
-                                               Text="{Binding CatchUpProgressSummary}"
-                                               ToolTip="{Binding CatchUpProgressSummary}"
-                                               Style="{StaticResource HintText}"
-                                               Margin="10,0,0,0" VerticalAlignment="Center"
-                                               TextTrimming="CharacterEllipsis"
-                                               Visibility="{Binding IsCatchUpRunning, Converter={StaticResource BoolToVis}}" />
-                                    <TextBlock DockPanel.Dock="Right" Text="{Binding RunFilterSummary}" Style="{StaticResource HintText}"
-                                               VerticalAlignment="Center" />
+                                <DockPanel DockPanel.Dock="Top" LastChildFill="True" Margin="0,12,0,0">
+                                    <!-- The summary is docked first so it reserves its own width, and
+                                         never wraps: a longer locale would otherwise squeeze it into a
+                                         one-character column and blow the row height up. The filter
+                                         controls then wrap onto a second line instead of being clipped. -->
+                                    <TextBlock DockPanel.Dock="Right" Text="{Binding RunFilterSummary}"
+                                               Style="{StaticResource HintText}" TextWrapping="NoWrap"
+                                               TextTrimming="CharacterEllipsis" ToolTip="{Binding RunFilterSummary}"
+                                               MaxWidth="220" Margin="10,0,0,0" VerticalAlignment="Center" />
+                                    <WrapPanel Orientation="Horizontal">
+                                        <TextBlock Text="按日期" Style="{StaticResource FieldLabel}"
+                                                   VerticalAlignment="Center" Margin="0,0,8,0" />
+                                        <DatePicker Width="150" SelectedDate="{Binding SelectedRunDate}"
+                                                    VerticalAlignment="Center" />
+                                        <Button Content="清除" Command="{Binding ClearRunDateFilterCommand}"
+                                                Style="{StaticResource SubtleButton}" Height="32" MinWidth="56"
+                                                Margin="8,4,0,0" VerticalAlignment="Center" />
+                                        <Button Content="生成离线完整回放" Command="{Binding ReconcileSelectedExperimentCommand}"
+                                                Height="32" MinWidth="132" Margin="8,4,0,0" VerticalAlignment="Center"
+                                                ToolTip="手动补齐解调并按记录策略完整重算；仅在全覆盖校验通过后发布独立离线 revision" />
+                                        <Button Content="删除离线版本" Command="{Binding DeleteOfflineCompleteRevisionCommand}"
+                                                Style="{StaticResource SubtleButton}"
+                                                Height="32" MinWidth="96" Margin="8,4,0,0" VerticalAlignment="Center"
+                                                ToolTip="仅删除所选实验的离线完整 revision；不删除 raw、解调数据或实时回放" />
+                                        <Button x:Name="CancelCatchUpButton" Content="停止离线重算"
+                                                Command="{Binding CancelCatchUpCommand}"
+                                                Style="{StaticResource SubtleButton}"
+                                                Height="32" MinWidth="80" Margin="8,4,0,0" VerticalAlignment="Center"
+                                                Visibility="{Binding IsCatchUpRunning, Converter={StaticResource BoolToVis}}"
+                                                ToolTip="在当前块结束后停止；暂存 revision 不会发布，可稍后继续" />
+                                        <TextBlock x:Name="CatchUpProgressText"
+                                                   Text="{Binding CatchUpProgressSummary}"
+                                                   ToolTip="{Binding CatchUpProgressSummary}"
+                                                   Style="{StaticResource HintText}" TextWrapping="NoWrap"
+                                                   MaxWidth="320" Margin="10,4,0,0" VerticalAlignment="Center"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   Visibility="{Binding IsCatchUpRunning, Converter={StaticResource BoolToVis}}" />
+                                    </WrapPanel>
                                 </DockPanel>
                                 <ListBox ItemsSource="{Binding ExperimentRunsView}" SelectedItem="{Binding SelectedExperimentRun}" Margin="0,12,0,0"
                                          MaxHeight="560" ScrollViewer.VerticalScrollBarVisibility="Auto">
@@ -2589,7 +2608,7 @@
                                     </StackPanel>
                                 </DockPanel>
                                 <TextBlock DockPanel.Dock="Top"
-                                           Text="从上方实验列表选择同一条实验，拖动滑条或点击播放逐帧回看：左图为重构模型相对值图像（物理标定前不可视为 S/m），右图为该帧 208 点边界电压幅值。"
+                                           Text="实时回放只包含采集期间实际完成逆问题并提交到界面的帧；离线回放只使用手动完整重算后发布的全覆盖 revision。两条线路的重构值、显示参数、ROI 与导出相互隔离。"
                                            Style="{StaticResource HintText}" Margin="0,8,0,0" />
                                 <Grid Margin="0,12,0,0">
                                     <Grid.ColumnDefinitions>
@@ -2884,10 +2903,20 @@
                                             </TabControl>
                                         </Grid>
                                         <DockPanel Grid.Row="4" Margin="0,10,0,0" LastChildFill="True">
-                                            <Button DockPanel.Dock="Left" Content="{Binding ReplayPlayButtonText}"
-                                                    Command="{Binding ToggleReplayPlaybackCommand}"
-                                                    Style="{StaticResource PrimaryButton}" MinWidth="84" />
+                                            <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Top">
+                                                <Button Content="{Binding LiveReplayButtonText}"
+                                                        Command="{Binding ToggleLiveReplayCommand}"
+                                                        Style="{StaticResource PrimaryButton}" MinWidth="112"
+                                                        ToolTip="仅回放实时采集期间实际显示并提交的重构帧" />
+                                                <Button Content="{Binding OfflineReplayButtonText}"
+                                                        Command="{Binding ToggleOfflineReplayCommand}"
+                                                        MinWidth="112" Margin="8,0,0,0"
+                                                        ToolTip="仅回放手动完整重算并原子发布的 offline-complete revision" />
+                                            </StackPanel>
                                             <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding ReplayLaneSummary}" Style="{StaticResource MonoText}"
+                                                           Foreground="{StaticResource Text2Brush}" FontSize="11"
+                                                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                                                 <TextBlock Text="{Binding ReplayLoadStatus}" Style="{StaticResource MonoText}"
                                                            ToolTip="{Binding ReplayLoadStatus}"
                                                            Foreground="#0b78c8" FontSize="11"

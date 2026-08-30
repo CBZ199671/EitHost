@@ -1,5 +1,6 @@
 using System.Windows.Media;
 using System.Windows.Threading;
+using System.Text.Json;
 using EitHost.App.ViewModels;
 using EitHost.Core.Analysis;
 using EitHost.Core.Concurrency;
@@ -42,6 +43,7 @@ internal sealed class ReplayVisualizationController : IDisposable
     private IReadOnlyList<FixedRoiTemporalAnalysis> replayFixedRoiAnalyses = [];
     private long replayCurveRebuildVersion;
     private long replayTemporalRebuildVersion;
+    private ExperimentRunListItem? selectedCanonicalExperiment;
 
     internal ReplayVisualizationController(
         VisualizationWorkspaceViewModel workspace,
@@ -63,6 +65,12 @@ internal sealed class ReplayVisualizationController : IDisposable
             isNonReplaceable: static request => request.IncludeCurve);
         RefreshCommand = new AsyncRelayCommand(RefreshImagingRunsAsync, () => frameStoreReady);
         TogglePlaybackCommand = new RelayCommand(ToggleReplayPlayback, () => replayFrames.Count > 0);
+        ToggleLiveReplayCommand = new RelayCommand(
+            () => _ = ToggleCanonicalLanePlaybackAsync(ReconstructionLane.Live),
+            () => HasPublishedLane(ReconstructionLane.Live));
+        ToggleOfflineReplayCommand = new RelayCommand(
+            () => _ = ToggleCanonicalLanePlaybackAsync(ReconstructionLane.OfflineComplete),
+            () => HasPublishedLane(ReconstructionLane.OfflineComplete));
         CalculateRoiCommand = new AsyncRelayCommand(CalculateReplayRoiAsync, CanCalculateReplayRoi);
     }
 
@@ -77,8 +85,15 @@ internal sealed class ReplayVisualizationController : IDisposable
     internal IReadOnlyList<FixedRoiTemporalSample> FixedRoiSamples => replayFixedRoiSamples;
     internal IReadOnlyList<FixedRoiTemporalAnalysis> FixedRoiAnalyses => replayFixedRoiAnalyses;
     internal string ReplaySetLabel => replayRunDetail?.SetLabel ?? "replay";
+    internal string ReplayExportSource => replaySource is ReconstructionLaneReplaySource laneSource
+        ? $"{laneSource.Lane}_{laneSource.RevisionId}"
+        : "replay";
+    internal string? ReplayLane => (replaySource as ReconstructionLaneReplaySource)?.Lane;
+    internal string? ReplayRevisionId => (replaySource as ReconstructionLaneReplaySource)?.RevisionId;
     internal AsyncRelayCommand RefreshCommand { get; }
     internal RelayCommand TogglePlaybackCommand { get; }
+    internal RelayCommand ToggleLiveReplayCommand { get; }
+    internal RelayCommand ToggleOfflineReplayCommand { get; }
     internal AsyncRelayCommand CalculateRoiCommand { get; }
     private string ImagePolarity => imagePolarity();
     private double ImageGain => imageGain();
@@ -88,6 +103,16 @@ internal sealed class ReplayVisualizationController : IDisposable
     {
         frameStoreReady = ready;
         RefreshCommand.RaiseCanExecuteChanged();
+    }
+
+    internal void ClearExperimentSelection()
+    {
+        selectedCanonicalExperiment = null;
+        workspace.SetReplayLaneAvailability(false, false);
+        workspace.SetActiveReplayLane(null, null);
+        RaiseLaneCommandAvailability();
+        StopPlayback();
+        Clear();
     }
 
     internal void InvalidateRoi()
@@ -270,6 +295,10 @@ internal sealed class ReplayVisualizationController : IDisposable
 
     internal async Task LoadLegacyRunAsync(ImagingRunListItem? item)
     {
+        selectedCanonicalExperiment = null;
+        workspace.SetReplayLaneAvailability(false, false);
+        workspace.SetActiveReplayLane(null, null);
+        RaiseLaneCommandAvailability();
         if (item is null || !frameStoreReady)
         {
             StopPlayback();
@@ -298,8 +327,11 @@ internal sealed class ReplayVisualizationController : IDisposable
 
     internal Task LoadCanonicalExperimentAsync(ExperimentRunListItem item)
     {
+        selectedCanonicalExperiment = item;
         if (!item.IsCanonicalTerminal)
         {
+            workspace.SetReplayLaneAvailability(false, false);
+            RaiseLaneCommandAvailability();
             StopPlayback();
             Interlocked.Increment(ref replayLoadVersion);
             Clear();
@@ -312,7 +344,82 @@ internal sealed class ReplayVisualizationController : IDisposable
             return Task.CompletedTask;
         }
 
-        return LoadReplaySourceAsync(item.Title, item.ExperimentRunId, CanonicalSource);
+        var live = CanonicalSource.GetPublishedReconstructionRevision(
+            item.ExperimentRunId,
+            ReconstructionLane.Live);
+        var offline = CanonicalSource.GetPublishedReconstructionRevision(
+            item.ExperimentRunId,
+            ReconstructionLane.OfflineComplete);
+        workspace.SetReplayLaneAvailability(live?.IsComplete == true, offline?.IsComplete == true);
+        RaiseLaneCommandAvailability();
+        var selected = live?.IsComplete == true ? live : offline?.IsComplete == true ? offline : null;
+        if (selected is null)
+        {
+            StopPlayback();
+            Interlocked.Increment(ref replayLoadVersion);
+            Clear();
+            workspace.SetActiveReplayLane(null, null);
+            workspace.ReplayRunSummary = $"{item.Title} · 尚无已发布回放线路";
+            workspace.ReplayFrameSummary = "实时线路只包含采集时已显示并提交的帧；离线线路需手动完整重算后发布。";
+            workspace.ReplayLoadStatus = "回放状态：无已发布 live/offline-complete revision";
+            return Task.CompletedTask;
+        }
+
+        return LoadPublishedLaneAsync(item, selected);
+    }
+
+    private Task LoadPublishedLaneAsync(
+        ExperimentRunListItem item,
+        ReconstructionRevisionCatalogRecord revision) =>
+        LoadReplaySourceAsync(
+            item.Title,
+            item.ExperimentRunId,
+            CanonicalSource.OpenPublishedReconstructionLane(
+                item.ExperimentRunId,
+                revision.Lane,
+                revision.RevisionId));
+
+    private async Task ToggleCanonicalLanePlaybackAsync(string lane)
+    {
+        var item = selectedCanonicalExperiment;
+        if (item is null)
+        {
+            return;
+        }
+
+        var revision = CanonicalSource.GetPublishedReconstructionRevision(item.ExperimentRunId, lane);
+        if (revision?.IsComplete != true)
+        {
+            StatusMessage = lane == ReconstructionLane.Live
+                ? "该实验没有可用的实时回放 revision。"
+                : "该实验尚未手动生成并发布离线完整回放。";
+            RaiseLaneCommandAvailability();
+            return;
+        }
+
+        if (replaySource is ReconstructionLaneReplaySource active &&
+            string.Equals(active.Lane, lane, StringComparison.Ordinal) &&
+            string.Equals(active.RevisionId, revision.RevisionId, StringComparison.Ordinal))
+        {
+            ToggleReplayPlayback();
+            return;
+        }
+
+        await LoadPublishedLaneAsync(item, revision).ConfigureAwait(true);
+        if (replayFrames.Count > 0)
+        {
+            ToggleReplayPlayback();
+        }
+    }
+
+    private bool HasPublishedLane(string lane) =>
+        selectedCanonicalExperiment is { } item &&
+        CanonicalSource.GetPublishedReconstructionRevision(item.ExperimentRunId, lane)?.IsComplete == true;
+
+    private void RaiseLaneCommandAvailability()
+    {
+        ToggleLiveReplayCommand.RaiseCanExecuteChanged();
+        ToggleOfflineReplayCommand.RaiseCanExecuteChanged();
     }
 
     private async Task LoadReplaySourceAsync(
@@ -323,6 +430,14 @@ internal sealed class ReplayVisualizationController : IDisposable
         StopPlayback();
         var version = Interlocked.Increment(ref replayLoadVersion);
         Clear();
+        if (runSource is ReconstructionLaneReplaySource laneSource)
+        {
+            workspace.SetActiveReplayLane(laneSource.Lane, laneSource.RevisionId);
+        }
+        else
+        {
+            workspace.SetActiveReplayLane(null, null);
+        }
         workspace.ReplayRunSummary = $"{title} · 正在加载…";
         workspace.ReplayFrameSummary = "正在加载实验记录。";
         workspace.ReplayContactSummary = "接触诊断：等待当前记录帧加载。";
@@ -373,8 +488,11 @@ internal sealed class ReplayVisualizationController : IDisposable
             TogglePlaybackCommand.RaiseCanExecuteChanged();
             CalculateRoiCommand.RaiseCanExecuteChanged();
             var ended = detail.EndedAt is { } endedAt ? endedAt.ToLocalTime().ToString("HH:mm:ss") : "进行中";
+            var laneSummary = runSource is ReconstructionLaneReplaySource loadedLane
+                ? $" · {DescribeLane(loadedLane.Lane)} · revision {loadedLane.RevisionId}"
+                : string.Empty;
             workspace.ReplayRunSummary =
-                $"{detail.SetLabel} · {detail.StartedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss} ~ {ended} · {detail.ReconstructionRoute} · 帧 {frames.Count}";
+                $"{detail.SetLabel} · {detail.StartedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss} ~ {ended} · {detail.ReconstructionRoute}{laneSummary} · 帧 {frames.Count}";
             if (frames.Count == 0)
             {
                 workspace.ReplayFrameSummary = "该记录没有已保存解调块。";
@@ -506,10 +624,24 @@ internal sealed class ReplayVisualizationController : IDisposable
 
             var nextCurveGeometry = CreateSeriesGeometry(frame.MeanAmplitude208);
             var replayContactStates = ParseReplayElectrodeStates(frame.ElectrodeStates);
+            var presentation = ReadPresentation(frame.ReconstructionPresentationJson);
+            var neutral = frame.ReconstructionFrameOutcome is not null &&
+                frame.ReconstructionFrameOutcome != ReconstructionFrameOutcome.Reconstructed ||
+                string.Equals(presentation?.OverlayDisposition, "neutral", StringComparison.Ordinal);
             ImageSource? nextImageSource;
             string reconText;
             string roiText;
-            if (frame.Conductivity is { Length: > 0 } conductivity
+            if (neutral)
+            {
+                var imagePixelSize = VisualizationGeometry.ClampImagePixelSize(workspace.RoiImageCanvasSize);
+                nextImageSource = await Task.Run(() =>
+                    replayImageRasterCache.RenderNeutral(replayContactStates, imagePixelSize)).ConfigureAwait(true);
+                reconText = frame.ReconstructionFrameOutcome == ReconstructionFrameOutcome.Neutral
+                    ? "中性帧（未执行逆问题）"
+                    : $"已排除：{frame.ReconstructionExclusionReason ?? frame.ReconstructionFrameOutcome}";
+                roiText = "ROI 无重构结果";
+            }
+            else if (frame.Conductivity is { Length: > 0 } conductivity
                 && detail.NodeCoords is { } nodes
                 && detail.CellConnectivity is { } cells)
             {
@@ -524,17 +656,26 @@ internal sealed class ReplayVisualizationController : IDisposable
                     OutputPersisted: false,
                     ReconstructionScaleStatus: detail.ReconstructionScaleStatus,
                     ReconstructionScaleProvenance: detail.ReconstructionScaleProvenance);
-                var polarity = ImagePolarity;
-                var gain = ImageGain;
+                var polarity = presentation?.Polarity ?? ImagePolarity;
+                var gain = presentation?.Gain ?? ImageGain;
                 var imagePixelSize = VisualizationGeometry.ClampImagePixelSize(workspace.RoiImageCanvasSize);
                 nextImageSource = await Task.Run(() =>
-                    VisualizationRenderer.RenderReconstructionImageCached(
-                        result,
-                        polarity,
-                        gain,
-                        replayContactStates,
-                        replayImageRasterCache,
-                        imagePixelSize)).ConfigureAwait(true);
+                    presentation is { ScaleCenter: { } center, ScaleRange: { } range } && range > 0.0
+                        ? replayImageRasterCache.RenderWithPersistedPresentation(
+                            result,
+                            polarity,
+                            gain,
+                            center,
+                            range,
+                            replayContactStates,
+                            imagePixelSize)
+                        : VisualizationRenderer.RenderReconstructionImageCached(
+                            result,
+                            polarity,
+                            gain,
+                            replayContactStates,
+                            replayImageRasterCache,
+                            imagePixelSize)).ConfigureAwait(true);
                 if (version != Volatile.Read(ref replayFrameVersion))
                 {
                     return;
@@ -579,7 +720,9 @@ internal sealed class ReplayVisualizationController : IDisposable
                       $"switch skew {epochRecord.SwitchSkewMilliseconds.GetValueOrDefault() / 1000.0:+0.000;-0.000;0.000}s"
                     : string.Empty;
             var nextFrameSummary =
-                $"帧 {displayIndex}/{frames.Count} · block {frame.BlockNumber} · {frame.CapturedAt.ToLocalTime():HH:mm:ss.fff} · 参考 {replayReference}{replayActionAudit} · 质量 {frame.QualityWeight:F2} ({frame.AcceptedFrames}/{totalFrames}) · {reconText} · {roiText}";
+                $"帧 {displayIndex}/{frames.Count} · block {frame.BlockNumber} · {frame.CapturedAt.ToLocalTime():HH:mm:ss.fff} · " +
+                $"线路 {DescribeLane(frame.ReconstructionLane)} · outcome {frame.ReconstructionFrameOutcome ?? "legacy"} · " +
+                $"参考 {replayReference}{replayActionAudit} · 质量 {frame.QualityWeight:F2} ({frame.AcceptedFrames}/{totalFrames}) · {reconText} · {roiText}";
             var nextContactSummary = FormatReplayContactSummary(frame, replayContactStates);
 
             displayedReplayFrameIndex = Math.Clamp(index, 0, frames.Count - 1);
@@ -630,6 +773,32 @@ internal sealed class ReplayVisualizationController : IDisposable
 
         return parsed;
     }
+
+    private static ReconstructionFramePresentation? ReadPresentation(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<ReconstructionFramePresentation>(
+                json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string DescribeLane(string? lane) => lane switch
+    {
+        ReconstructionLane.Live => "实时",
+        ReconstructionLane.OfflineComplete => "离线完整",
+        _ => "旧版"
+    };
 
     private static string FormatReplayContactSummary(
         ImagingFrameDetail frame,
@@ -897,6 +1066,7 @@ internal sealed class ReplayVisualizationController : IDisposable
 
         replayImageRasterCache.ResetColorScale();
         replaySource = null;
+        workspace.SetActiveReplayLane(null, null);
         replayRunDetail = null;
         replayFrames = [];
         workspace.SetReplayFrameCount(0);

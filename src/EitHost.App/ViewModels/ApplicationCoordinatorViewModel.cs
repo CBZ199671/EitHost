@@ -929,6 +929,8 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
         VisualizationWorkspace.ConfigureCommands(new VisualizationWorkspaceCommands(
             RefreshImagingRunsCommand,
             ToggleReplayPlaybackCommand,
+            replayController.ToggleLiveReplayCommand,
+            replayController.ToggleOfflineReplayCommand,
             CalculateReplayRoiCommand,
             SaveRoiCurveCommand,
             ClearRealtimeRoiCurveCommand));
@@ -3069,8 +3071,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
         if (experiment is null)
         {
             VisualizationWorkspace.SetSelectedImagingRun(null, notifySelection: false);
-            replayController.StopPlayback();
-            replayController.Clear();
+            replayController.ClearExperimentSelection();
             return;
         }
 

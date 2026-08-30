@@ -101,3 +101,14 @@ public sealed record ReconstructionLaneCoverage(
         Denominator == TerminalOutcomeCount &&
         TerminalOutcomeCount == ReconstructedCount + NeutralCount + ExcludedCount;
 }
+
+public sealed record ReconstructionFramePresentation(
+    string RendererVersion,
+    string Colormap,
+    string Polarity,
+    double Gain,
+    double? ScaleCenter,
+    double? ScaleRange,
+    string OverlayDisposition,
+    bool LowConfidence,
+    string Stats);

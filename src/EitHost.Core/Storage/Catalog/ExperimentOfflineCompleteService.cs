@@ -32,6 +32,13 @@ public sealed record OfflineCompleteReport(
     string Status,
     string? UnavailableReason = null);
 
+public sealed record OfflineRevisionDeletionReport(
+    Guid ExperimentRunId,
+    string RevisionId,
+    bool CleanupComplete,
+    string? RecoveryDirectory = null,
+    string? CleanupError = null);
+
 /// <summary>
 /// Builds the manual, immutable offline-complete reconstruction lane. It never reads or mutates
 /// live Kalman state and never falls back to all-one measurement weights.
@@ -58,6 +65,95 @@ public sealed class ExperimentOfflineCompleteService
         this.backend = backend ?? throw new ArgumentNullException(nameof(backend));
         this.writer = writer ?? new DerivedArtifactHdf5Writer();
         replaySource = new CanonicalExperimentReplaySource(this.layout, this.catalog);
+    }
+
+    public OfflineRevisionDeletionReport DeleteRevision(Guid experimentRunId, string revisionId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(revisionId);
+        var run = catalog.GetRun(experimentRunId) ??
+            throw new KeyNotFoundException($"Experiment run {experimentRunId:D} does not exist.");
+        var revision = catalog.GetReconstructionRevision(
+                experimentRunId,
+                ReconstructionLane.OfflineComplete,
+                revisionId) ??
+            throw new KeyNotFoundException(
+                $"Reconstruction revision {ReconstructionLane.OfflineComplete}/{revisionId} does not exist.");
+        if (!IsTerminal(run))
+        {
+            throw new InvalidOperationException("Only a terminal experiment may delete an offline revision.");
+        }
+
+        var runDirectory = layout.ResolveArtifactPath(run.RunDirectory);
+        var quarantineRoot = Path.Combine(runDirectory, "offline", ".deleted");
+        var deleteToken = Guid.NewGuid().ToString("N");
+        var moved = new List<(string Source, string Quarantine)>();
+        try
+        {
+            foreach (var (source, suffix) in new[]
+                     {
+                         (layout.GetOfflineRevisionDirectory(run.RunDirectory, revision.RevisionId), "published"),
+                         (layout.GetOfflineRevisionDirectory(run.RunDirectory, revision.RevisionId, staging: true), "staging")
+                     })
+            {
+                EnsurePathIsWithinRun(runDirectory, source);
+                if (!Directory.Exists(source))
+                {
+                    continue;
+                }
+
+                Directory.CreateDirectory(quarantineRoot);
+                var quarantine = Path.Combine(
+                    quarantineRoot,
+                    $"{revision.RevisionId}-{deleteToken}-{suffix}");
+                Directory.Move(source, quarantine);
+                moved.Add((source, quarantine));
+            }
+
+            catalog.DeleteReconstructionRevision(
+                experimentRunId,
+                ReconstructionLane.OfflineComplete,
+                revision.RevisionId);
+        }
+        catch
+        {
+            foreach (var item in moved.AsEnumerable().Reverse())
+            {
+                if (!Directory.Exists(item.Quarantine))
+                {
+                    continue;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(item.Source)!);
+                Directory.Move(item.Quarantine, item.Source);
+            }
+
+            throw;
+        }
+
+        try
+        {
+            foreach (var item in moved)
+            {
+                Directory.Delete(item.Quarantine, recursive: true);
+            }
+
+            if (Directory.Exists(quarantineRoot) &&
+                !Directory.EnumerateFileSystemEntries(quarantineRoot).Any())
+            {
+                Directory.Delete(quarantineRoot);
+            }
+
+            return new OfflineRevisionDeletionReport(experimentRunId, revision.RevisionId, true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return new OfflineRevisionDeletionReport(
+                experimentRunId,
+                revision.RevisionId,
+                false,
+                quarantineRoot,
+                ex.Message);
+        }
     }
 
     public OfflineCompletePreflight Preflight(Guid experimentRunId)
@@ -221,6 +317,7 @@ public sealed class ExperimentOfflineCompleteService
                 0,
                 plans.Count));
             var completed = 0;
+            var presentationScale = new RealtimeImageColorScaleTracker();
             foreach (var plan in plans)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -232,6 +329,7 @@ public sealed class ExperimentOfflineCompleteService
                         fingerprint,
                         manifest,
                         plan,
+                        presentationScale,
                         cancellationToken).ConfigureAwait(false);
                 }
                 else
@@ -523,6 +621,7 @@ public sealed class ExperimentOfflineCompleteService
         string algorithmFingerprint,
         ReconstructionPipelineManifestPayload manifest,
         OfflineFramePlan plan,
+        RealtimeImageColorScaleTracker presentationScale,
         CancellationToken cancellationToken)
     {
         var input = plan.Input;
@@ -576,6 +675,13 @@ public sealed class ExperimentOfflineCompleteService
             throw new InvalidDataException(
                 $"block {input.Block.BlockNumber} 未满足动态 Kalman 等价链：action={result.DynamicKalmanAction ?? "none"}。");
         }
+
+        if (plan.ResetKalman)
+        {
+            presentationScale.Reset();
+        }
+
+        var colorScale = presentationScale.Update(result.Conductivity);
 
         var existing = catalog.GetReconstructionLaneFrame(
             run.ExperimentRunId,
@@ -636,7 +742,12 @@ public sealed class ExperimentOfflineCompleteService
             HashDoubles(plan.FinalWeights!),
             dynamic?.SessionId,
             result.DynamicKalmanAction,
-            CreatePresentationJson(manifest, result.Conductivity, "conductivity", null),
+            CreatePresentationJson(
+                manifest,
+                "conductivity",
+                null,
+                colorScale.Center,
+                colorScale.Range),
             SourceStartSampleIndex: input.Block.SourceStartSampleIndex,
             SourceEndSampleIndex: input.Block.SourceEndSampleIndex,
             ResultHash: HashDoubles(result.Conductivity)));
@@ -661,9 +772,10 @@ public sealed class ExperimentOfflineCompleteService
             algorithmFingerprint,
             PresentationJson: CreatePresentationJson(
                 catalog.GetOfflinePipelineReadiness(run.ExperimentRunId).Manifest!,
-                null,
                 "neutral",
-                plan.ExclusionReason),
+                plan.ExclusionReason,
+                null,
+                null),
             ExclusionReason: plan.ExclusionReason,
             SourceStartSampleIndex: input.Block.SourceStartSampleIndex,
             SourceEndSampleIndex: input.Block.SourceEndSampleIndex));
@@ -881,28 +993,19 @@ public sealed class ExperimentOfflineCompleteService
 
     private static string CreatePresentationJson(
         ReconstructionPipelineManifestPayload manifest,
-        IReadOnlyList<double>? conductivity,
         string overlay,
-        string? reason)
+        string? reason,
+        double? scaleCenter,
+        double? scaleRange)
     {
-        double? center = null;
-        double? range = null;
-        if (conductivity is { Count: > 0 })
-        {
-            var minimum = conductivity.Min();
-            var maximum = conductivity.Max();
-            center = 0.5 * (minimum + maximum);
-            range = Math.Max(Math.Abs(maximum - center.Value), Math.Abs(minimum - center.Value));
-        }
-
         return JsonSerializer.Serialize(new
         {
             manifest.Presentation.RendererVersion,
             manifest.Presentation.Colormap,
-            Polarity = manifest.Presentation.PolarityPolicy,
+            Polarity = "normal",
             Gain = 1.0,
-            ScaleCenter = center,
-            ScaleRange = range,
+            ScaleCenter = scaleCenter,
+            ScaleRange = scaleRange,
             OverlayDisposition = overlay,
             LowConfidence = false,
             Stats = reason ?? "offline-complete"
@@ -927,6 +1030,18 @@ public sealed class ExperimentOfflineCompleteService
 
     private static bool IsTerminal(ExperimentRunRecord run) => run.Status is
         ExperimentCatalog.CompletedStatus or ExperimentCatalog.InterruptedStatus or ExperimentCatalog.FailedStatus;
+
+    private static void EnsurePathIsWithinRun(string runDirectory, string candidate)
+    {
+        var runRoot = Path.GetFullPath(runDirectory)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+            Path.DirectorySeparatorChar;
+        var fullCandidate = Path.GetFullPath(candidate);
+        if (!fullCandidate.StartsWith(runRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("Offline revision directory escapes the experiment run directory.");
+        }
+    }
 
     private static string CreateRevisionId() =>
         $"offline-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid():N}";

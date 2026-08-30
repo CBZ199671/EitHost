@@ -928,6 +928,35 @@ public sealed class ExperimentCatalog
             ("$published", ReconstructionRevisionStatus.Published));
     }
 
+    public void DeleteReconstructionRevision(
+        Guid experimentRunId,
+        string lane,
+        string revisionId)
+    {
+        ValidateLaneIdentity(lane, revisionId);
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        var (runStatus, _, _) = ReadRunLifecycle(connection, experimentRunId);
+        EnsureTerminalStatus(runStatus);
+        if (GetReconstructionRevision(connection, experimentRunId, lane, revisionId) is null)
+        {
+            throw new KeyNotFoundException($"Reconstruction revision {lane}/{revisionId} does not exist.");
+        }
+
+        ExecuteNonQuery(
+            connection,
+            """
+            DELETE FROM reconstruction_revisions
+            WHERE experiment_run_id = $experiment_run_id
+              AND lane = $lane
+              AND revision_id = $revision_id;
+            """,
+            ("$experiment_run_id", experimentRunId.ToString("D")),
+            ("$lane", lane),
+            ("$revision_id", revisionId));
+        transaction.Commit();
+    }
+
     public void RegisterReferenceEpoch(ExperimentReferenceEpochCatalogRecord epoch)
     {
         ArgumentNullException.ThrowIfNull(epoch);

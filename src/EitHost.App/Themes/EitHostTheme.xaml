@@ -122,6 +122,9 @@
     <DataTemplate x:Key="WrappedCheckLabel">
         <TextBlock Text="{Binding}" TextWrapping="Wrap" />
     </DataTemplate>
+    <DataTemplate x:Key="WrappedHeaderLabel">
+        <TextBlock Text="{Binding}" TextWrapping="Wrap" />
+    </DataTemplate>
 
     <Style x:Key="MonoLog" TargetType="TextBlock" BasedOn="{StaticResource MonoText}">
         <Setter Property="Foreground" Value="#35414D" />

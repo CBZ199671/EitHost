@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Media;
 using EitHost.Core.Analysis;
 using EitHost.Core.Application.Visualization;
+using EitHost.Core.Storage.Catalog;
 
 namespace EitHost.App.ViewModels.Workspaces;
 
@@ -29,6 +30,10 @@ public sealed class VisualizationWorkspaceViewModel
     private int replayFrameIndex;
     private int replayFrameCount;
     private bool isReplayPlaying;
+    private string? activeReplayLane;
+    private string? activeReplayRevisionId;
+    private bool hasLiveReplay;
+    private bool hasOfflineCompleteReplay;
     private ImageSource? replayImageSource;
     private Geometry? replayCurveGeometry;
     private FixedRoiTemporalVisualSnapshot replayFixedRoiTemporal = FixedRoiTemporalVisualSnapshot.Empty;
@@ -300,12 +305,65 @@ public sealed class VisualizationWorkspaceViewModel
             if (SetProperty(ref isReplayPlaying, value))
             {
                 OnPropertyChanged(nameof(ReplayPlayButtonText));
+                OnPropertyChanged(nameof(LiveReplayButtonText));
+                OnPropertyChanged(nameof(OfflineReplayButtonText));
                 PublishStateSnapshot();
             }
         }
     }
 
     public string ReplayPlayButtonText => IsReplayPlaying ? "暂停" : "播放";
+
+    public string LiveReplayButtonText =>
+        IsReplayPlaying && ActiveReplayLane == ReconstructionLane.Live ? "暂停实时回放" : "实时回放";
+
+    public string OfflineReplayButtonText =>
+        IsReplayPlaying && ActiveReplayLane == ReconstructionLane.OfflineComplete ? "暂停离线回放" : "离线回放";
+
+    public string? ActiveReplayLane
+    {
+        get => activeReplayLane;
+        private set
+        {
+            if (SetProperty(ref activeReplayLane, value))
+            {
+                OnPropertyChanged(nameof(LiveReplayButtonText));
+                OnPropertyChanged(nameof(OfflineReplayButtonText));
+                OnPropertyChanged(nameof(ReplayLaneSummary));
+            }
+        }
+    }
+
+    public string? ActiveReplayRevisionId
+    {
+        get => activeReplayRevisionId;
+        private set
+        {
+            if (SetProperty(ref activeReplayRevisionId, value))
+            {
+                OnPropertyChanged(nameof(ReplayLaneSummary));
+            }
+        }
+    }
+
+    public bool HasLiveReplay
+    {
+        get => hasLiveReplay;
+        private set => SetProperty(ref hasLiveReplay, value);
+    }
+
+    public bool HasOfflineCompleteReplay
+    {
+        get => hasOfflineCompleteReplay;
+        private set => SetProperty(ref hasOfflineCompleteReplay, value);
+    }
+
+    public string ReplayLaneSummary => ActiveReplayLane switch
+    {
+        ReconstructionLane.Live => $"线路：实时回放 · revision {ActiveReplayRevisionId}",
+        ReconstructionLane.OfflineComplete => $"线路：离线完整回放 · revision {ActiveReplayRevisionId}",
+        _ => "线路：旧版/未选择"
+    };
 
     /// <summary>
     /// Live edge of the square conductivity surface. The container reports its measured size and
@@ -743,6 +801,10 @@ public sealed class VisualizationWorkspaceViewModel
 
     public RelayCommand ToggleReplayPlaybackCommand { get; private set; } = null!;
 
+    public RelayCommand ToggleLiveReplayCommand { get; private set; } = null!;
+
+    public RelayCommand ToggleOfflineReplayCommand { get; private set; } = null!;
+
     public AsyncRelayCommand CalculateReplayRoiCommand { get; private set; } = null!;
 
     public RelayCommand SaveRoiCurveCommand { get; private set; } = null!;
@@ -767,10 +829,24 @@ public sealed class VisualizationWorkspaceViewModel
         ArgumentNullException.ThrowIfNull(commands);
         RefreshImagingRunsCommand = commands.RefreshImagingRuns;
         ToggleReplayPlaybackCommand = commands.ToggleReplayPlayback;
+        ToggleLiveReplayCommand = commands.ToggleLiveReplay;
+        ToggleOfflineReplayCommand = commands.ToggleOfflineReplay;
         CalculateReplayRoiCommand = commands.CalculateReplayRoi;
         SaveRoiCurveCommand = commands.SaveRoiCurve;
         ClearRealtimeRoiCurveCommand = commands.ClearRealtimeRoiCurve;
         OnPropertyChanged(string.Empty);
+    }
+
+    internal void SetReplayLaneAvailability(bool hasLive, bool hasOfflineComplete)
+    {
+        HasLiveReplay = hasLive;
+        HasOfflineCompleteReplay = hasOfflineComplete;
+    }
+
+    internal void SetActiveReplayLane(string? lane, string? revisionId)
+    {
+        ActiveReplayLane = lane;
+        ActiveReplayRevisionId = revisionId;
     }
 
     internal void SetSelectedImagingRun(ImagingRunListItem? item, bool notifySelection)
@@ -1144,6 +1220,8 @@ internal sealed record VisualizationRoiDefinitionSnapshot(
 public sealed record VisualizationWorkspaceCommands(
     AsyncRelayCommand RefreshImagingRuns,
     RelayCommand ToggleReplayPlayback,
+    RelayCommand ToggleLiveReplay,
+    RelayCommand ToggleOfflineReplay,
     AsyncRelayCommand CalculateReplayRoi,
     RelayCommand SaveRoiCurve,
     RelayCommand ClearRealtimeRoiCurve);

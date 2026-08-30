@@ -541,12 +541,41 @@ internal static class VisualizationRenderer
             }
         }
 
+        public ImageSource RenderWithPersistedPresentation(
+            RealtimeReconstructionResult result,
+            string imagePolarity,
+            double imageGain,
+            double scaleCenter,
+            double scaleRange,
+            IReadOnlyList<ElectrodeContactState>? electrodeStates,
+            int imagePixelSize = VisualizationGeometry.DefaultImagePixelSize)
+        {
+            if (!double.IsFinite(scaleCenter) || !double.IsFinite(scaleRange) || scaleRange <= 0.0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(scaleRange), "Persisted image color scale is invalid.");
+            }
+
+            lock (renderGate)
+            {
+                return RenderCore(
+                    result,
+                    imagePolarity,
+                    imageGain,
+                    electrodeStates,
+                    imagePixelSize,
+                    scaleCenter,
+                    scaleRange).Image;
+            }
+        }
+
         private RealtimeRenderedImage RenderCore(
             RealtimeReconstructionResult result,
             string imagePolarity,
             double imageGain,
             IReadOnlyList<ElectrodeContactState>? electrodeStates,
-            int imagePixelSize)
+            int imagePixelSize,
+            double? persistedScaleCenter = null,
+            double? persistedScaleRange = null)
         {
             ApplyPendingColorScaleReset();
             var edge = VisualizationGeometry.ClampImagePixelSize(imagePixelSize);
@@ -556,17 +585,19 @@ internal static class VisualizationRenderer
             RealtimeImageColorScaleSnapshot? appliedScale = null;
             if (cellByPixel is not null && result.Conductivity.Length > 0)
             {
-                var scale = colorScale.Update(result.Conductivity);
+                var scale = persistedScaleCenter is { } center && persistedScaleRange is { } range
+                    ? new RealtimeImageColorScaleSnapshot(center, range, range, true)
+                    : colorScale.Update(result.Conductivity);
                 appliedScale = scale;
-                var center = scale.Center;
-                var range = scale.Range;
+                var appliedCenter = scale.Center;
+                var appliedRange = scale.Range;
 
                 var invert = NormalizeRealtimeImagePolarity(imagePolarity) == "inverted";
                 var gain = Math.Clamp(imageGain, 0.1, 5.0);
                 var colors = new int[result.Conductivity.Length];
                 for (var cell = 0; cell < colors.Length; cell++)
                 {
-                    colors[cell] = ColorFor(result.Conductivity[cell], center, range, invert, gain);
+                    colors[cell] = ColorFor(result.Conductivity[cell], appliedCenter, appliedRange, invert, gain);
                 }
 
                 Parallel.For(

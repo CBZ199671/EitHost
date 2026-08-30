@@ -1840,4 +1840,10 @@ public sealed record ImagingFrameDetail(
     int? DemodRotationDirection,
     bool CommonScaleNormalized,
     string CommonScaleNormalizationPolicy,
-    double? CommonScaleNormalizationFactor);
+    double? CommonScaleNormalizationFactor,
+    string? ReconstructionLane = null,
+    string? ReconstructionRevisionId = null,
+    string? ReconstructionFrameOutcome = null,
+    string? ReconstructionPresentationJson = null,
+    string? ReconstructionExclusionReason = null,
+    string? ReconstructionAlgorithmFingerprint = null);
