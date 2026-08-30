@@ -140,7 +140,7 @@ internal static class ReconstructionPipelineManifestFactory
                 SessionPolicyVersion: "offline-own-session-per-reset-boundary-v1",
                 ImportLiveState: false),
             new ReconstructionPresentationPolicy(
-                "realtime-raster-v2",
+                "realtime-raster-v3-node-interpolated",
                 "blue-white-red-v1",
                 "robust-quantile-adaptive-v1",
                 "per-frame-persisted",

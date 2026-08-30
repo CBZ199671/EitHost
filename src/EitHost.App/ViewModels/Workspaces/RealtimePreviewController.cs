@@ -507,7 +507,7 @@ internal sealed class RealtimePreviewController
             ? new RealtimeLiveFrameCommit(
                 evidence,
                 new RealtimeImagePresentationEvidence(
-                    RendererVersion: "realtime-raster-v2",
+                    RendererVersion: "realtime-raster-v3-node-interpolated",
                     Colormap: "blue-white-red-v1",
                     Polarity: imagePolarity,
                     Gain: imageGain,

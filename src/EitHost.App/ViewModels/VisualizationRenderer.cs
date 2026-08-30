@@ -101,13 +101,15 @@ internal static class VisualizationRenderer
     }
 
     private static void FillTriangle(
-        int[] pixels,
+        int[] cells,
+        float[] barycentricWeight0,
+        float[] barycentricWeight1,
         int width,
         int height,
         (double X, double Y) p0,
         (double X, double Y) p1,
         (double X, double Y) p2,
-        int color)
+        int cell)
     {
         var minX = Math.Max(0, (int)Math.Floor(Math.Min(p0.X, Math.Min(p1.X, p2.X))));
         var maxX = Math.Min(width - 1, (int)Math.Ceiling(Math.Max(p0.X, Math.Max(p1.X, p2.X))));
@@ -129,7 +131,10 @@ internal static class VisualizationRenderer
                 var w2 = Edge(p0, p1, point);
                 if (area > 0 ? w0 >= 0 && w1 >= 0 && w2 >= 0 : w0 <= 0 && w1 <= 0 && w2 <= 0)
                 {
-                    pixels[checked(y * width + x)] = color;
+                    var pixelIndex = checked(y * width + x);
+                    cells[pixelIndex] = cell;
+                    barycentricWeight0[pixelIndex] = (float)(w0 / area);
+                    barycentricWeight1[pixelIndex] = (float)(w1 / area);
                 }
             }
         }
@@ -502,6 +507,15 @@ internal static class VisualizationRenderer
     {
         private const int BackgroundColor = unchecked((int)0xFFF8FAFC);
         private int[]? cellByPixel;
+        private float[]? barycentricWeight0ByPixel;
+        private float[]? barycentricWeight1ByPixel;
+        private int[]? node0ByCell;
+        private int[]? node1ByCell;
+        private int[]? node2ByCell;
+        private double[]? cellAreaWeights;
+        private double[]? nodeValueBuffer;
+        private double[]? nodeWeightBuffer;
+        private int rasterNodeCount;
         private int[]? frameBuffer;
         private ulong meshSignature;
         private int rasterPixelSize;
@@ -594,29 +608,64 @@ internal static class VisualizationRenderer
 
                 var invert = NormalizeRealtimeImagePolarity(imagePolarity) == "inverted";
                 var gain = Math.Clamp(imageGain, 0.1, 5.0);
-                var colors = new int[result.Conductivity.Length];
-                for (var cell = 0; cell < colors.Length; cell++)
-                {
-                    colors[cell] = ColorFor(result.Conductivity[cell], appliedCenter, appliedRange, invert, gain);
-                }
+                var nodeValues = ProjectCellValuesToNodes(result.Conductivity);
+                var rasterCells = cellByPixel;
+                var weight0ByPixel = barycentricWeight0ByPixel;
+                var weight1ByPixel = barycentricWeight1ByPixel;
+                var cellNode0 = node0ByCell;
+                var cellNode1 = node1ByCell;
+                var cellNode2 = node2ByCell;
 
-                Parallel.For(
-                    0,
-                    edge,
-                    new ParallelOptions { MaxDegreeOfParallelism = Parallelism },
-                    y =>
-                    {
-                        var rowOffset = y * edge;
-                        for (var x = 0; x < edge; x++)
+                if (weight0ByPixel is not null
+                    && weight1ByPixel is not null
+                    && cellNode0 is not null
+                    && cellNode1 is not null
+                    && cellNode2 is not null)
+                {
+                    Parallel.For(
+                        0,
+                        edge,
+                        new ParallelOptions { MaxDegreeOfParallelism = Parallelism },
+                        y =>
                         {
-                            var pixelIndex = rowOffset + x;
-                            var cell = cellByPixel[pixelIndex];
-                            if ((uint)cell < (uint)colors.Length)
+                            var rowOffset = y * edge;
+                            for (var x = 0; x < edge; x++)
                             {
-                                pixels[pixelIndex] = colors[cell];
+                                var pixelIndex = rowOffset + x;
+                                var cell = rasterCells[pixelIndex];
+                                if ((uint)cell >= (uint)cellNode0.Length)
+                                {
+                                    continue;
+                                }
+
+                                var node0 = cellNode0[cell];
+                                var node1 = cellNode1[cell];
+                                var node2 = cellNode2[cell];
+                                if ((uint)node0 >= (uint)nodeValues.Length
+                                    || (uint)node1 >= (uint)nodeValues.Length
+                                    || (uint)node2 >= (uint)nodeValues.Length)
+                                {
+                                    continue;
+                                }
+
+                                var value0 = nodeValues[node0];
+                                var value1 = nodeValues[node1];
+                                var value2 = nodeValues[node2];
+                                if (!double.IsFinite(value0)
+                                    || !double.IsFinite(value1)
+                                    || !double.IsFinite(value2))
+                                {
+                                    continue;
+                                }
+
+                                var weight0 = weight0ByPixel[pixelIndex];
+                                var weight1 = weight1ByPixel[pixelIndex];
+                                var weight2 = 1.0 - weight0 - weight1;
+                                var value = (value0 * weight0) + (value1 * weight1) + (value2 * weight2);
+                                pixels[pixelIndex] = ColorFor(value, appliedCenter, appliedRange, invert, gain);
                             }
-                        }
-                    });
+                        });
+                }
             }
 
             DrawCircle(pixels, edge, edge, unchecked((int)0xFF334155));
@@ -692,8 +741,18 @@ internal static class VisualizationRenderer
 
             var raster = new int[checked(edge * edge)];
             Array.Fill(raster, -1);
+            var barycentricWeight0 = new float[raster.Length];
+            var barycentricWeight1 = new float[raster.Length];
             var nodeCount = nodeCoords.GetLength(0);
             var coordColumns = nodeCoords.GetLength(1);
+            var cellCount = cellConnectivity.GetLength(0);
+            var node0 = new int[cellCount];
+            var node1 = new int[cellCount];
+            var node2 = new int[cellCount];
+            var areaWeights = new double[cellCount];
+            Array.Fill(node0, -1);
+            Array.Fill(node1, -1);
+            Array.Fill(node2, -1);
             if (nodeCount > 0 && coordColumns > 0 && cellConnectivity.GetLength(1) >= 3)
             {
                 var xs = new double[nodeCount];
@@ -710,7 +769,7 @@ internal static class VisualizationRenderer
                 var maxY = ys.Max();
                 var spanX = Math.Max(maxX - minX, 1.0e-12);
                 var spanY = Math.Max(maxY - minY, 1.0e-12);
-                for (var cell = 0; cell < cellConnectivity.GetLength(0); cell++)
+                for (var cell = 0; cell < cellCount; cell++)
                 {
                     var a = cellConnectivity[cell, 0];
                     var b = cellConnectivity[cell, 1];
@@ -720,8 +779,23 @@ internal static class VisualizationRenderer
                         continue;
                     }
 
+                    var modelArea = Math.Abs(Edge(
+                        (xs[a], ys[a]),
+                        (xs[b], ys[b]),
+                        (xs[c], ys[c])));
+                    if (modelArea <= 1.0e-18)
+                    {
+                        continue;
+                    }
+
+                    node0[cell] = a;
+                    node1[cell] = b;
+                    node2[cell] = c;
+                    areaWeights[cell] = modelArea;
                     FillTriangle(
                         raster,
+                        barycentricWeight0,
+                        barycentricWeight1,
                         edge,
                         edge,
                         Transform(xs[a], ys[a], minX, minY, spanX, spanY, edge, edge),
@@ -732,10 +806,82 @@ internal static class VisualizationRenderer
             }
 
             cellByPixel = raster;
+            barycentricWeight0ByPixel = barycentricWeight0;
+            barycentricWeight1ByPixel = barycentricWeight1;
+            node0ByCell = node0;
+            node1ByCell = node1;
+            node2ByCell = node2;
+            cellAreaWeights = areaWeights;
+            rasterNodeCount = nodeCount;
+            nodeValueBuffer = null;
+            nodeWeightBuffer = null;
             meshSignature = signature;
             rasterPixelSize = edge;
             colorScale.Reset();
             RasterBuildCount++;
+        }
+
+        /// <summary>
+        /// Converts the solver's piecewise-constant element values into a continuous display field.
+        /// This is presentation-only: the persisted conductivity and every downstream calculation
+        /// continue to use the original element values.
+        /// </summary>
+        private double[] ProjectCellValuesToNodes(double[] conductivity)
+        {
+            if (rasterNodeCount <= 0
+                || node0ByCell is null
+                || node1ByCell is null
+                || node2ByCell is null
+                || cellAreaWeights is null)
+            {
+                return [];
+            }
+
+            if (nodeValueBuffer is null || nodeValueBuffer.Length != rasterNodeCount)
+            {
+                nodeValueBuffer = new double[rasterNodeCount];
+                nodeWeightBuffer = new double[rasterNodeCount];
+            }
+
+            var values = nodeValueBuffer;
+            var weights = nodeWeightBuffer!;
+            Array.Clear(values);
+            Array.Clear(weights);
+
+            var projectedCellCount = Math.Min(conductivity.Length, node0ByCell.Length);
+            for (var cell = 0; cell < projectedCellCount; cell++)
+            {
+                var value = conductivity[cell];
+                var areaWeight = cellAreaWeights[cell];
+                var node0 = node0ByCell[cell];
+                var node1 = node1ByCell[cell];
+                var node2 = node2ByCell[cell];
+                if (!double.IsFinite(value)
+                    || !double.IsFinite(areaWeight)
+                    || areaWeight <= 0.0
+                    || node0 < 0
+                    || node1 < 0
+                    || node2 < 0)
+                {
+                    continue;
+                }
+
+                values[node0] += value * areaWeight;
+                values[node1] += value * areaWeight;
+                values[node2] += value * areaWeight;
+                weights[node0] += areaWeight;
+                weights[node1] += areaWeight;
+                weights[node2] += areaWeight;
+            }
+
+            for (var node = 0; node < values.Length; node++)
+            {
+                values[node] = weights[node] > 0.0
+                    ? values[node] / weights[node]
+                    : double.NaN;
+            }
+
+            return values;
         }
 
         private static ulong ComputeMeshSignature(double[,] nodes, int[,] cells)
