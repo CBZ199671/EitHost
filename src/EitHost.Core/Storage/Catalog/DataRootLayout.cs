@@ -109,6 +109,22 @@ public sealed class DataRootLayout
         return path;
     }
 
+    public string GetGlobalReconstructionMeshPath(string fingerprint)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(fingerprint);
+        const string prefix = "sha256:";
+        if (!fingerprint.StartsWith(prefix, StringComparison.Ordinal) ||
+            fingerprint.Length != prefix.Length + 64 ||
+            fingerprint[prefix.Length..].Any(character => !Uri.IsHexDigit(character)))
+        {
+            throw new ArgumentException("Mesh fingerprint must be a SHA-256 digest.", nameof(fingerprint));
+        }
+
+        return ResolveArtifactPath(Path.Combine(
+            "meshes",
+            $"mesh_{fingerprint[prefix.Length..].ToLowerInvariant()}.h5"));
+    }
+
     public string GetDerivedBlockPath(
         Guid experimentRunId,
         DateTimeOffset startedAt,

@@ -26,6 +26,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
     private readonly DataRootLayout dataLayout;
     private readonly ExperimentCatalog catalog;
     private readonly DerivedArtifactHdf5Writer writer;
+    private readonly GlobalReconstructionMeshStore meshStore;
     private readonly ExperimentBackendExchangeArchiver backendExchangeArchiver;
     private readonly Action<string> diagnostic;
     private readonly Action<string> backendArchiveWarning;
@@ -44,6 +45,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         this.dataLayout = dataLayout ?? throw new ArgumentNullException(nameof(dataLayout));
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         this.writer = writer ?? throw new ArgumentNullException(nameof(writer));
+        meshStore = new GlobalReconstructionMeshStore(this.dataLayout, this.writer);
         this.backendExchangeArchiver = backendExchangeArchiver ?? throw new ArgumentNullException(nameof(backendExchangeArchiver));
         this.diagnostic = diagnostic ?? throw new ArgumentNullException(nameof(diagnostic));
         this.backendArchiveWarning = backendArchiveWarning ?? throw new ArgumentNullException(nameof(backendArchiveWarning));
@@ -193,24 +195,28 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         var processingRecord = CreateProcessingBlockRecord(config, block, acquiredAt, processedAt, "ready");
         try
         {
-            var derivedDirectory = dataLayout.EnsureDerivedDirectory(config.ImagingRunId, state.ExperimentStartedAt);
+            _ = dataLayout.EnsureDerivedDirectory(config.ImagingRunId, state.ExperimentStartedAt);
+            var meshReference = await Task.Run(() => meshStore.Ensure(
+                config.ImagingRunId,
+                processedAt,
+                result.NodeCoords,
+                result.CellConnectivity,
+                result.Conductivity.Length)).ConfigureAwait(false);
+            if (!string.Equals(state.CanonicalMeshFingerprint, meshReference.Fingerprint, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Persisted reconstruction mesh does not match the live run mesh: {state.CanonicalMeshFingerprint} / {meshReference.Fingerprint}.");
+            }
+
             if (Interlocked.CompareExchange(ref state.DerivedMeshPersisted, 1, 0) == 0)
             {
                 try
                 {
-                    var meshPath = Path.Combine(derivedDirectory, "mesh.h5");
-                    await Task.Run(() => writer.WriteMesh(
-                        meshPath,
-                        new DerivedMeshData(
-                            config.ImagingRunId,
-                            processedAt,
-                            result.NodeCoords,
-                            result.CellConnectivity))).ConfigureAwait(false);
                     catalog.RegisterDerivedArtifact(new DerivedArtifactCatalogRecord(
                         config.ImagingRunId,
                         -1,
                         "mesh",
-                        dataLayout.ToRelativeArtifactPath(meshPath),
+                        meshReference.ArtifactPath,
                         "/mesh",
                         processedAt));
                 }
@@ -253,7 +259,9 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
                     DynamicKalmanMode: result.DynamicKalmanMode,
                     DynamicKalmanFallback: result.DynamicKalmanFallback,
                     DynamicKalmanSolveMilliseconds: result.DynamicKalmanSolveMilliseconds,
-                    ReconstructionBackendElapsedMilliseconds: result.BackendElapsed.TotalMilliseconds))).ConfigureAwait(false);
+                    ReconstructionBackendElapsedMilliseconds: result.BackendElapsed.TotalMilliseconds,
+                    MeshFingerprint: meshReference.Fingerprint,
+                    MeshArtifactPath: meshReference.ArtifactPath))).ConfigureAwait(false);
             catalog.RecordReconstructionOutcome(
                 processingRecord,
                 "ready",

@@ -70,6 +70,11 @@ public sealed class DerivedArtifactHdf5Writer
     public void WriteReconstruction(string filePath, DerivedReconstructionData data)
     {
         ArgumentNullException.ThrowIfNull(data);
+        if (string.IsNullOrWhiteSpace(data.MeshFingerprint) != string.IsNullOrWhiteSpace(data.MeshArtifactPath))
+        {
+            throw new InvalidDataException("Reconstruction mesh fingerprint and artifact path must be recorded together.");
+        }
+
         var reconstruction = new H5Group
         {
             ["conductivity"] = data.Conductivity,
@@ -256,7 +261,8 @@ public sealed class DerivedArtifactHdf5Writer
                 {
                     ["experiment_run_id"] = data.ExperimentRunId.ToString("D"),
                     ["kind"] = "mesh",
-                    ["created_at_utc"] = data.CreatedAt.ToUniversalTime().ToString("O")
+                    ["created_at_utc"] = data.CreatedAt.ToUniversalTime().ToString("O"),
+                    ["mesh_fingerprint"] = data.Fingerprint ?? string.Empty
                 }
             }
         };
@@ -950,13 +956,16 @@ public sealed record DerivedReconstructionData(
     string? DynamicKalmanMode = null,
     bool? DynamicKalmanFallback = null,
     double? DynamicKalmanSolveMilliseconds = null,
-    double? ReconstructionBackendElapsedMilliseconds = null);
+    double? ReconstructionBackendElapsedMilliseconds = null,
+    string? MeshFingerprint = null,
+    string? MeshArtifactPath = null);
 
 public sealed record DerivedMeshData(
     Guid ExperimentRunId,
     DateTimeOffset CreatedAt,
     double[,] NodeCoords,
-    int[,] CellConnectivity);
+    int[,] CellConnectivity,
+    string? Fingerprint = null);
 
 public sealed record DerivedFrameDiagnosticsData(
     Guid ExperimentRunId,
@@ -1147,7 +1156,9 @@ public sealed record DerivedReconstructionMetadata(
     string? DynamicKalmanMode,
     bool? DynamicKalmanFallback,
     double? DynamicKalmanSolveMilliseconds,
-    double? ReconstructionBackendElapsedMilliseconds)
+    double? ReconstructionBackendElapsedMilliseconds,
+    string? MeshFingerprint = null,
+    string? MeshArtifactPath = null)
 {
     public static DerivedReconstructionMetadata From(DerivedReconstructionData data) => new(
         data.ProcessingMode,
@@ -1163,5 +1174,7 @@ public sealed record DerivedReconstructionMetadata(
         data.DynamicKalmanMode,
         data.DynamicKalmanFallback,
         data.DynamicKalmanSolveMilliseconds,
-        data.ReconstructionBackendElapsedMilliseconds);
+        data.ReconstructionBackendElapsedMilliseconds,
+        data.MeshFingerprint,
+        data.MeshArtifactPath);
 }

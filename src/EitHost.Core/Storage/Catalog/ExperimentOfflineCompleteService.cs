@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
 using EitHost.Core.Diagnostics.ElectrodeContact;
@@ -51,8 +52,10 @@ public sealed class ExperimentOfflineCompleteService
     private readonly ExperimentCatalog catalog;
     private readonly IRealtimeReconstructionBackend backend;
     private readonly DerivedArtifactHdf5Writer writer;
+    private readonly GlobalReconstructionMeshStore meshStore;
     private readonly CanonicalExperimentReplaySource replaySource;
     private readonly EcdCwrCenteredTemporalDespiker temporalDespiker = new();
+    private readonly ConcurrentDictionary<(Guid RunId, string RevisionId), string> revisionMeshFingerprints = new();
 
     public ExperimentOfflineCompleteService(
         DataRootLayout layout,
@@ -64,6 +67,7 @@ public sealed class ExperimentOfflineCompleteService
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         this.backend = backend ?? throw new ArgumentNullException(nameof(backend));
         this.writer = writer ?? new DerivedArtifactHdf5Writer();
+        meshStore = new GlobalReconstructionMeshStore(this.layout, this.writer);
         replaySource = new CanonicalExperimentReplaySource(this.layout, this.catalog);
     }
 
@@ -694,6 +698,13 @@ public sealed class ExperimentOfflineCompleteService
         }
 
         var processedAt = DateTimeOffset.UtcNow;
+        var meshReference = meshStore.Ensure(
+            run.ExperimentRunId,
+            processedAt,
+            result.NodeCoords,
+            result.CellConnectivity,
+            result.Conductivity.Length);
+        EnsureRevisionMeshIdentity(run.ExperimentRunId, revisionId, meshReference.Fingerprint);
         var outputPath = layout.GetOfflineDerivedBlockPath(
             run.RunDirectory,
             revisionId,
@@ -726,7 +737,9 @@ public sealed class ExperimentOfflineCompleteService
             result.DynamicKalmanMode,
             result.DynamicKalmanFallback,
             result.DynamicKalmanSolveMilliseconds,
-            result.BackendElapsed.TotalMilliseconds));
+            result.BackendElapsed.TotalMilliseconds,
+            meshReference.Fingerprint,
+            meshReference.ArtifactPath));
         catalog.RecordReconstructionLaneFrame(new ReconstructionLaneFrameCatalogRecord(
             run.ExperimentRunId,
             ReconstructionLane.OfflineComplete,
@@ -896,11 +909,44 @@ public sealed class ExperimentOfflineCompleteService
         }
 
         using var file = Hdf5FileAccess.OpenReadWithRetry(path);
-        return file.LinkExists(frame.DatasetPath) &&
-               string.Equals(
-                   frame.ResultHash,
-                   HashDoubles(file.Dataset(frame.DatasetPath).Read<double[]>()),
-                   StringComparison.Ordinal);
+        if (!file.LinkExists(frame.DatasetPath) ||
+            !string.Equals(
+                frame.ResultHash,
+                HashDoubles(file.Dataset(frame.DatasetPath).Read<double[]>()),
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var metadataPath = DataRootLayout.GetDerivedDatasetPath(
+            frame.SourceBlockNumber,
+            "/metadata/reconstruction_json");
+        if (!file.LinkExists(metadataPath))
+        {
+            return false;
+        }
+
+        var metadata = JsonSerializer.Deserialize<DerivedReconstructionMetadata>(
+            file.Dataset(metadataPath).Read<string>());
+        if (string.IsNullOrWhiteSpace(metadata?.MeshFingerprint) ||
+            string.IsNullOrWhiteSpace(metadata.MeshArtifactPath))
+        {
+            return false;
+        }
+
+        _ = meshStore.Load(metadata.MeshArtifactPath, metadata.MeshFingerprint);
+        EnsureRevisionMeshIdentity(frame.ExperimentRunId, frame.RevisionId, metadata.MeshFingerprint);
+        return true;
+    }
+
+    private void EnsureRevisionMeshIdentity(Guid runId, string revisionId, string fingerprint)
+    {
+        var expected = revisionMeshFingerprints.GetOrAdd((runId, revisionId), fingerprint);
+        if (!string.Equals(expected, fingerprint, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Offline revision mesh changed: {expected} -> {fingerprint}.");
+        }
     }
 
     private OfflineCompleteReport CreatePublishedReport(Guid experimentRunId, string revisionId)

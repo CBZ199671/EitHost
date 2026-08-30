@@ -64,6 +64,7 @@ internal sealed class RealtimeRunState : ReferenceReconstructionCoordinator
 
     internal int DemodPersistedBlocks;
     internal int DemodPersistenceFailures;
+    internal string? CanonicalMeshFingerprint;
     internal RealtimeRawRingBuffer? RawRingBuffer { get; set; }
     internal RealtimeRawChannelBuffer? RawPreviewBuffer { get; set; }
     internal Usb2070AcquisitionMetadata? RawRingAcquisitionMetadata { get; set; }

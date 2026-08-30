@@ -73,12 +73,27 @@ public sealed class CanonicalExperimentReplaySource
         var latestEpoch = epochs.LastOrDefault();
         double[,]? nodes = null;
         int[,]? cells = null;
+        string? meshFingerprint = null;
         if (ResolveArtifactPath(run, blockNumber: -1, "mesh", "mesh.h5") is { } meshPath)
         {
             using var mesh = Hdf5FileAccess.OpenReadWithRetry(meshPath);
-            ValidateRunIdentity(mesh, imagingRunId);
             nodes = ReadOptional<double[,]>(mesh, "/mesh/node_coords");
             cells = ReadOptional<int[,]>(mesh, "/mesh/cell_connectivity");
+            if (nodes is not null && cells is not null)
+            {
+                meshFingerprint = ReconstructionMeshFingerprint.Compute(nodes, cells);
+                var recordedFingerprint = ReadOptional<string>(mesh, "/metadata/run/mesh_fingerprint");
+                if (!string.IsNullOrWhiteSpace(recordedFingerprint) &&
+                    !string.Equals(recordedFingerprint, meshFingerprint, StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException("Global reconstruction mesh fingerprint is invalid.");
+                }
+
+                if (string.IsNullOrWhiteSpace(recordedFingerprint))
+                {
+                    ValidateRunIdentity(mesh, imagingRunId);
+                }
+            }
         }
 
         return new ImagingRunDetail(
@@ -113,7 +128,8 @@ public sealed class CanonicalExperimentReplaySource
             config?.EffectiveDwellUs,
             config?.AdRangeCode,
             config?.AdcFullSpanVolts,
-            config?.AdcLsbVolts);
+            config?.AdcLsbVolts,
+            meshFingerprint);
     }
 
     public IReadOnlyList<ImagingFrameIndexEntry> ListFrameIndex(Guid imagingRunId)
@@ -460,7 +476,9 @@ public sealed class CanonicalExperimentReplaySource
             DemodRotationDirection: diagnosticsMetadata?.DemodRotationDirection,
             CommonScaleNormalized: diagnosticsMetadata?.CommonScaleNormalized ?? false,
             CommonScaleNormalizationPolicy: diagnosticsMetadata?.CommonScaleNormalizationPolicy ?? "none",
-            CommonScaleNormalizationFactor: diagnosticsMetadata?.CommonScaleNormalizationFactor);
+            CommonScaleNormalizationFactor: diagnosticsMetadata?.CommonScaleNormalizationFactor,
+            ReconstructionMeshFingerprint: reconstructionMetadata?.MeshFingerprint,
+            ReconstructionMeshArtifactPath: reconstructionMetadata?.MeshArtifactPath);
     }
 
     private string? ResolveArtifactPath(

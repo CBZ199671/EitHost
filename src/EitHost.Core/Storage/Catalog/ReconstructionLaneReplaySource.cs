@@ -15,6 +15,8 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
     private readonly ReconstructionRevisionCatalogRecord revision;
     private readonly IReadOnlyList<ReconstructionLaneFrameCatalogRecord> laneFrames;
     private readonly IReadOnlyDictionary<int, ReconstructionLaneFrameCatalogRecord> framesByBlock;
+    private readonly GlobalReconstructionMeshStore meshStore;
+    private ImagingRunDetail? laneDetail;
 
     public ReconstructionLaneReplaySource(
         DataRootLayout layout,
@@ -27,6 +29,7 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
         this.layout = layout ?? throw new ArgumentNullException(nameof(layout));
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         this.canonical = canonical ?? throw new ArgumentNullException(nameof(canonical));
+        meshStore = new GlobalReconstructionMeshStore(this.layout, new DerivedArtifactHdf5Writer());
         this.experimentRunId = experimentRunId;
         revision = catalog.GetReconstructionRevision(experimentRunId, lane, revisionId)
             ?? throw new KeyNotFoundException($"Reconstruction revision {lane}/{revisionId} does not exist.");
@@ -53,8 +56,59 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
 
     public ReconstructionRevisionCatalogRecord Revision => revision;
 
-    public ImagingRunDetail? GetImagingRunDetail(Guid imagingRunId) =>
-        imagingRunId == experimentRunId ? canonical.GetImagingRunDetail(imagingRunId) : null;
+    public ImagingRunDetail? GetImagingRunDetail(Guid imagingRunId)
+    {
+        if (imagingRunId != experimentRunId)
+        {
+            return null;
+        }
+
+        if (laneDetail is not null)
+        {
+            return laneDetail;
+        }
+
+        var detail = canonical.GetImagingRunDetail(imagingRunId);
+        if (detail is null)
+        {
+            return null;
+        }
+
+        foreach (var laneFrame in laneFrames.Where(frame =>
+                     frame.Outcome == ReconstructionFrameOutcome.Reconstructed &&
+                     frame.ArtifactPath is not null))
+        {
+            using var file = Hdf5FileAccess.OpenReadWithRetry(
+                layout.ResolveArtifactPath(laneFrame.ArtifactPath!));
+            var metadataPath = DataRootLayout.GetDerivedDatasetPath(
+                laneFrame.SourceBlockNumber,
+                "/metadata/reconstruction_json");
+            if (!file.LinkExists(metadataPath))
+            {
+                continue;
+            }
+
+            var metadata = JsonSerializer.Deserialize<DerivedReconstructionMetadata>(
+                file.Dataset(metadataPath).Read<string>());
+            if (string.IsNullOrWhiteSpace(metadata?.MeshFingerprint) ||
+                string.IsNullOrWhiteSpace(metadata.MeshArtifactPath))
+            {
+                continue;
+            }
+
+            var mesh = meshStore.Load(metadata.MeshArtifactPath, metadata.MeshFingerprint);
+            laneDetail = detail with
+            {
+                NodeCoords = mesh.NodeCoords,
+                CellConnectivity = mesh.CellConnectivity,
+                MeshFingerprint = mesh.Fingerprint
+            };
+            return laneDetail;
+        }
+
+        laneDetail = detail;
+        return laneDetail;
+    }
 
     public IReadOnlyList<ImagingFrameIndexEntry> ListFrameIndex(Guid imagingRunId)
     {
@@ -140,6 +194,18 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
             }
         }
 
+        if (conductivity is { Length: > 0 } && !string.IsNullOrWhiteSpace(metadata?.MeshFingerprint))
+        {
+            var detail = GetImagingRunDetail(imagingRunId)
+                ?? throw new InvalidDataException("Reconstruction lane mesh is unavailable.");
+            if (string.IsNullOrWhiteSpace(detail.MeshFingerprint) ||
+                !string.Equals(detail.MeshFingerprint, metadata.MeshFingerprint, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Reconstruction frame mesh does not match lane mesh for block {blockNumber}.");
+            }
+        }
+
         return frame with
         {
             Conductivity = conductivity,
@@ -163,7 +229,9 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
             ReconstructionFrameOutcome = laneFrame.Outcome,
             ReconstructionPresentationJson = laneFrame.PresentationJson,
             ReconstructionExclusionReason = laneFrame.ExclusionReason,
-            ReconstructionAlgorithmFingerprint = laneFrame.AlgorithmFingerprint
+            ReconstructionAlgorithmFingerprint = laneFrame.AlgorithmFingerprint,
+            ReconstructionMeshFingerprint = metadata?.MeshFingerprint,
+            ReconstructionMeshArtifactPath = metadata?.MeshArtifactPath
         };
     }
 

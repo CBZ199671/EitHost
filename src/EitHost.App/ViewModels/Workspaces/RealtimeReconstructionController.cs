@@ -2,6 +2,7 @@ using System.IO;
 using EitHost.Core.Demodulation;
 using EitHost.Core.Diagnostics.ElectrodeContact;
 using EitHost.Core.Reconstruction;
+using EitHost.Core.Storage.Hdf5;
 
 namespace EitHost.App.ViewModels.Workspaces;
 
@@ -250,6 +251,19 @@ internal sealed class RealtimeReconstructionController
             !ApplyDynamicKalmanResult(config, state, result, out result))
         {
             return;
+        }
+
+        var meshFingerprint = ReconstructionMeshFingerprint.Compute(
+            result.NodeCoords,
+            result.CellConnectivity);
+        if (state.CanonicalMeshFingerprint is null)
+        {
+            state.CanonicalMeshFingerprint = meshFingerprint;
+        }
+        else if (!string.Equals(state.CanonicalMeshFingerprint, meshFingerprint, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Realtime reconstruction mesh changed within one run: {state.CanonicalMeshFingerprint} -> {meshFingerprint}.");
         }
 
         UpdateContactSubspaceEvidence(state, result);

@@ -12,6 +12,7 @@ public sealed class ExperimentReconstructionCatchUpService
     private readonly ExperimentCatalog catalog;
     private readonly IRealtimeReconstructionBackend backend;
     private readonly DerivedArtifactHdf5Writer writer;
+    private readonly GlobalReconstructionMeshStore meshStore;
     private readonly CanonicalExperimentReplaySource replaySource;
 
     public ExperimentReconstructionCatchUpService(
@@ -24,6 +25,7 @@ public sealed class ExperimentReconstructionCatchUpService
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         this.backend = backend ?? throw new ArgumentNullException(nameof(backend));
         this.writer = writer ?? new DerivedArtifactHdf5Writer();
+        meshStore = new GlobalReconstructionMeshStore(this.layout, this.writer);
         replaySource = new CanonicalExperimentReplaySource(this.layout, this.catalog);
     }
 
@@ -302,6 +304,24 @@ public sealed class ExperimentReconstructionCatchUpService
             layout.ResolveArtifactPath(run.RunDirectory),
             "derived");
         Directory.CreateDirectory(derivedDirectory);
+        var meshReference = meshStore.Ensure(
+            run.ExperimentRunId,
+            processedAt,
+            result.NodeCoords,
+            result.CellConnectivity,
+            result.Conductivity.Length);
+        var existingMeshArtifact = catalog.ListDerivedArtifacts(run.ExperimentRunId, -1)
+            .FirstOrDefault(artifact => string.Equals(artifact.Kind, "mesh", StringComparison.Ordinal));
+        if (existingMeshArtifact is not null)
+        {
+            var existingMesh = meshStore.Load(existingMeshArtifact.ArtifactPath);
+            if (!string.Equals(existingMesh.Fingerprint, meshReference.Fingerprint, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Catch-up reconstruction mesh differs from the run mesh: {existingMesh.Fingerprint} -> {meshReference.Fingerprint}.");
+            }
+        }
+
         var outputPath = layout.GetDerivedBlockPath(run.RunDirectory, block.BlockNumber);
         writer.WriteReconstruction(
             outputPath,
@@ -322,17 +342,17 @@ public sealed class ExperimentReconstructionCatchUpService
                 referenceVoltage208,
                 targetVoltage208,
                 measurementWeight208,
-                ReconstructionBackendElapsedMilliseconds: result.BackendElapsed.TotalMilliseconds));
-        if (result.NodeCoords.Length > 0 && result.CellConnectivity.Length > 0)
-        {
-            writer.WriteMesh(
-                Path.Combine(derivedDirectory, "mesh.h5"),
-                new DerivedMeshData(
-                    run.ExperimentRunId,
-                    processedAt,
-                    result.NodeCoords,
-                    result.CellConnectivity));
-        }
+                ReconstructionBackendElapsedMilliseconds: result.BackendElapsed.TotalMilliseconds,
+                MeshFingerprint: meshReference.Fingerprint,
+                MeshArtifactPath: meshReference.ArtifactPath));
+
+        catalog.RegisterDerivedArtifact(new DerivedArtifactCatalogRecord(
+            run.ExperimentRunId,
+            -1,
+            "mesh",
+            meshReference.ArtifactPath,
+            "/mesh",
+            processedAt));
 
         catalog.RecordReconstructionOutcome(
             block,

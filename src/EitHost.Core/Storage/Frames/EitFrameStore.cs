@@ -1764,7 +1764,8 @@ public sealed record ImagingRunDetail(
     double? EffectiveDwellUs = null,
     int? AdRangeCode = null,
     double? AdcFullSpanVolts = null,
-    double? AdcLsbVolts = null);
+    double? AdcLsbVolts = null,
+    string? MeshFingerprint = null);
 
 public sealed record ImagingFrameIndexEntry(
     int BlockNumber,
@@ -1846,4 +1847,6 @@ public sealed record ImagingFrameDetail(
     string? ReconstructionFrameOutcome = null,
     string? ReconstructionPresentationJson = null,
     string? ReconstructionExclusionReason = null,
-    string? ReconstructionAlgorithmFingerprint = null);
+    string? ReconstructionAlgorithmFingerprint = null,
+    string? ReconstructionMeshFingerprint = null,
+    string? ReconstructionMeshArtifactPath = null);
