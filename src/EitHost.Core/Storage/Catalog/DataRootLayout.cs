@@ -130,6 +130,43 @@ public sealed class DataRootLayout
             $"derived_shard_{shard:D6}.h5");
     }
 
+    public string GetOfflineRevisionRelativeDirectory(
+        string runRelativeDirectory,
+        string revisionId,
+        bool staging = false)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runRelativeDirectory);
+        ValidateRevisionToken(revisionId);
+        return staging
+            ? Path.Combine(runRelativeDirectory, "offline", ".staging", revisionId)
+            : Path.Combine(runRelativeDirectory, "offline", revisionId);
+    }
+
+    public string GetOfflineRevisionDirectory(
+        string runRelativeDirectory,
+        string revisionId,
+        bool staging = false)
+    {
+        return ResolveArtifactPath(GetOfflineRevisionRelativeDirectory(
+            runRelativeDirectory,
+            revisionId,
+            staging));
+    }
+
+    public string GetOfflineDerivedBlockPath(
+        string runRelativeDirectory,
+        string revisionId,
+        int blockNumber,
+        bool staging = false)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(blockNumber);
+        var shard = (blockNumber - 1) / DerivedBlocksPerShard;
+        return Path.Combine(
+            GetOfflineRevisionDirectory(runRelativeDirectory, revisionId, staging),
+            "derived",
+            $"offline_shard_{shard:D6}.h5");
+    }
+
     public static string GetDerivedBlockRoot(int blockNumber)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(blockNumber);
@@ -153,6 +190,14 @@ public sealed class DataRootLayout
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
         var fileName = Path.GetFileName(filePath);
         return fileName.StartsWith("derived_shard_", StringComparison.OrdinalIgnoreCase) &&
+               fileName.EndsWith(".h5", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsCanonicalOfflineDerivedShardPath(string filePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+        var fileName = Path.GetFileName(filePath);
+        return fileName.StartsWith("offline_shard_", StringComparison.OrdinalIgnoreCase) &&
                fileName.EndsWith(".h5", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -242,6 +287,19 @@ public sealed class DataRootLayout
             relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal))
         {
             throw new ArgumentException("Path must stay inside DataRoot.", parameterName);
+        }
+    }
+
+    private static void ValidateRevisionToken(string revisionId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(revisionId);
+        if (revisionId.Length > 80 ||
+            revisionId is "." or ".." ||
+            revisionId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+            revisionId.Contains(Path.DirectorySeparatorChar) ||
+            revisionId.Contains(Path.AltDirectorySeparatorChar))
+        {
+            throw new ArgumentException("Offline revision id must be one safe path token.", nameof(revisionId));
         }
     }
 }

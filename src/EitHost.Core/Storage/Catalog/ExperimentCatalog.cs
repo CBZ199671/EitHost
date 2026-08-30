@@ -7,7 +7,7 @@ namespace EitHost.Core.Storage.Catalog;
 
 public sealed class ExperimentCatalog
 {
-    public const int CurrentSchemaVersion = 5;
+    public const int CurrentSchemaVersion = 6;
     public const string RecordingStatus = "recording";
     public const string CompletedStatus = "completed";
     public const string InterruptedStatus = "interrupted";
@@ -140,6 +140,49 @@ public sealed class ExperimentCatalog
                 updated_at_utc TEXT NOT NULL,
                 FOREIGN KEY(experiment_run_id) REFERENCES experiment_runs(experiment_run_id)
             );
+            CREATE TABLE IF NOT EXISTS reconstruction_revisions (
+                experiment_run_id TEXT NOT NULL,
+                lane TEXT NOT NULL,
+                revision_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                algorithm_fingerprint TEXT NOT NULL,
+                raw_denominator INTEGER NOT NULL DEFAULT 0,
+                demod_denominator INTEGER NOT NULL DEFAULT 0,
+                terminal_outcome_count INTEGER NOT NULL DEFAULT 0,
+                reconstructed_count INTEGER NOT NULL DEFAULT 0,
+                neutral_count INTEGER NOT NULL DEFAULT 0,
+                excluded_count INTEGER NOT NULL DEFAULT 0,
+                estimated_incremental_bytes INTEGER NOT NULL DEFAULT 0,
+                created_at_utc TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                published_at_utc TEXT NULL,
+                failure_message TEXT NULL,
+                PRIMARY KEY(experiment_run_id, lane, revision_id),
+                FOREIGN KEY(experiment_run_id) REFERENCES experiment_runs(experiment_run_id)
+            );
+            CREATE TABLE IF NOT EXISTS reconstruction_lane_frames (
+                experiment_run_id TEXT NOT NULL,
+                lane TEXT NOT NULL,
+                revision_id TEXT NOT NULL,
+                source_block_number INTEGER NOT NULL,
+                sequence_number INTEGER NOT NULL,
+                outcome TEXT NOT NULL,
+                acquired_at_utc TEXT NOT NULL,
+                processed_at_utc TEXT NOT NULL,
+                algorithm_fingerprint TEXT NOT NULL,
+                artifact_path TEXT NULL,
+                dataset_path TEXT NULL,
+                final_weight_hash TEXT NULL,
+                kalman_session_id TEXT NULL,
+                kalman_disposition TEXT NULL,
+                presentation_json TEXT NULL,
+                exclusion_reason TEXT NULL,
+                PRIMARY KEY(experiment_run_id, lane, revision_id, source_block_number),
+                UNIQUE(experiment_run_id, lane, revision_id, sequence_number),
+                FOREIGN KEY(experiment_run_id, lane, revision_id)
+                    REFERENCES reconstruction_revisions(experiment_run_id, lane, revision_id)
+                    ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS reference_epochs (
                 experiment_run_id TEXT NOT NULL,
                 reference_epoch INTEGER NOT NULL,
@@ -225,6 +268,10 @@ public sealed class ExperimentCatalog
                 ON experiment_exports(experiment_run_id, exported_at_utc DESC);
             CREATE INDEX IF NOT EXISTS idx_experiment_exports_source
                 ON experiment_exports(source_artifact_path, dataset_path);
+            CREATE INDEX IF NOT EXISTS idx_reconstruction_revisions_published
+                ON reconstruction_revisions(experiment_run_id, lane, status, published_at_utc DESC);
+            CREATE INDEX IF NOT EXISTS idx_reconstruction_lane_frames_sequence
+                ON reconstruction_lane_frames(experiment_run_id, lane, revision_id, sequence_number);
             """);
         SetUserVersion(connection, CurrentSchemaVersion);
         transaction.Commit();
@@ -331,6 +378,390 @@ public sealed class ExperimentCatalog
             ? null
             : JsonSerializer.Deserialize<ExperimentRunConfigRecord>(json)
               ?? throw new InvalidDataException("Experiment run config JSON is invalid.");
+    }
+
+    public void UpsertReconstructionRevision(ReconstructionRevisionCatalogRecord revision)
+    {
+        ArgumentNullException.ThrowIfNull(revision);
+        ValidateReconstructionRevision(revision);
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        var existing = GetReconstructionRevision(
+            connection,
+            revision.ExperimentRunId,
+            revision.Lane,
+            revision.RevisionId);
+        if (existing?.IsPublished == true && existing != revision)
+        {
+            throw new InvalidOperationException("Published reconstruction revisions are immutable.");
+        }
+
+        ExecuteNonQuery(
+            connection,
+            """
+            INSERT INTO reconstruction_revisions(
+                experiment_run_id, lane, revision_id, status, algorithm_fingerprint,
+                raw_denominator, demod_denominator, terminal_outcome_count,
+                reconstructed_count, neutral_count, excluded_count,
+                estimated_incremental_bytes, created_at_utc, updated_at_utc,
+                published_at_utc, failure_message)
+            VALUES(
+                $experiment_run_id, $lane, $revision_id, $status, $algorithm_fingerprint,
+                $raw_denominator, $demod_denominator, $terminal_outcome_count,
+                $reconstructed_count, $neutral_count, $excluded_count,
+                $estimated_incremental_bytes, $created_at_utc, $updated_at_utc,
+                $published_at_utc, $failure_message)
+            ON CONFLICT(experiment_run_id, lane, revision_id) DO UPDATE SET
+                status = excluded.status,
+                algorithm_fingerprint = excluded.algorithm_fingerprint,
+                raw_denominator = excluded.raw_denominator,
+                demod_denominator = excluded.demod_denominator,
+                terminal_outcome_count = excluded.terminal_outcome_count,
+                reconstructed_count = excluded.reconstructed_count,
+                neutral_count = excluded.neutral_count,
+                excluded_count = excluded.excluded_count,
+                estimated_incremental_bytes = excluded.estimated_incremental_bytes,
+                updated_at_utc = excluded.updated_at_utc,
+                published_at_utc = excluded.published_at_utc,
+                failure_message = excluded.failure_message;
+            """,
+            ("$experiment_run_id", revision.ExperimentRunId.ToString("D")),
+            ("$lane", revision.Lane),
+            ("$revision_id", revision.RevisionId),
+            ("$status", revision.Status),
+            ("$algorithm_fingerprint", revision.AlgorithmFingerprint),
+            ("$raw_denominator", revision.RawDenominator),
+            ("$demod_denominator", revision.DemodDenominator),
+            ("$terminal_outcome_count", revision.TerminalOutcomeCount),
+            ("$reconstructed_count", revision.ReconstructedCount),
+            ("$neutral_count", revision.NeutralCount),
+            ("$excluded_count", revision.ExcludedCount),
+            ("$estimated_incremental_bytes", revision.EstimatedIncrementalBytes),
+            ("$created_at_utc", Format(revision.CreatedAt)),
+            ("$updated_at_utc", Format(revision.UpdatedAt)),
+            ("$published_at_utc", revision.PublishedAt is { } publishedAt ? Format(publishedAt) : null),
+            ("$failure_message", revision.FailureMessage));
+        transaction.Commit();
+    }
+
+    public ReconstructionRevisionCatalogRecord? GetReconstructionRevision(
+        Guid experimentRunId,
+        string lane,
+        string revisionId)
+    {
+        ValidateLaneIdentity(lane, revisionId);
+        using var connection = OpenConnection();
+        return GetReconstructionRevision(connection, experimentRunId, lane, revisionId);
+    }
+
+    public IReadOnlyList<ReconstructionRevisionCatalogRecord> ListReconstructionRevisions(
+        Guid experimentRunId,
+        string? lane = null)
+    {
+        if (lane is not null && !ReconstructionLane.IsKnown(lane))
+        {
+            throw new ArgumentOutOfRangeException(nameof(lane), lane, "Unknown reconstruction lane.");
+        }
+
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT experiment_run_id, lane, revision_id, status, algorithm_fingerprint,
+                   raw_denominator, demod_denominator, terminal_outcome_count,
+                   reconstructed_count, neutral_count, excluded_count,
+                   estimated_incremental_bytes, created_at_utc, updated_at_utc,
+                   published_at_utc, failure_message
+            FROM reconstruction_revisions
+            WHERE experiment_run_id = $experiment_run_id
+              AND ($lane IS NULL OR lane = $lane)
+            ORDER BY COALESCE(published_at_utc, updated_at_utc) DESC, revision_id DESC;
+            """;
+        command.Parameters.AddWithValue("$experiment_run_id", experimentRunId.ToString("D"));
+        command.Parameters.AddWithValue("$lane", (object?)lane ?? DBNull.Value);
+        using var reader = command.ExecuteReader();
+        var revisions = new List<ReconstructionRevisionCatalogRecord>();
+        while (reader.Read())
+        {
+            revisions.Add(ReadReconstructionRevision(reader));
+        }
+
+        return revisions;
+    }
+
+    public ReconstructionRevisionCatalogRecord? GetPublishedReconstructionRevision(
+        Guid experimentRunId,
+        string lane)
+    {
+        if (!ReconstructionLane.IsKnown(lane))
+        {
+            throw new ArgumentOutOfRangeException(nameof(lane), lane, "Unknown reconstruction lane.");
+        }
+
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT experiment_run_id, lane, revision_id, status, algorithm_fingerprint,
+                   raw_denominator, demod_denominator, terminal_outcome_count,
+                   reconstructed_count, neutral_count, excluded_count,
+                   estimated_incremental_bytes, created_at_utc, updated_at_utc,
+                   published_at_utc, failure_message
+            FROM reconstruction_revisions
+            WHERE experiment_run_id = $experiment_run_id
+              AND lane = $lane
+              AND status = $published
+            ORDER BY published_at_utc DESC, revision_id DESC
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$experiment_run_id", experimentRunId.ToString("D"));
+        command.Parameters.AddWithValue("$lane", lane);
+        command.Parameters.AddWithValue("$published", ReconstructionRevisionStatus.Published);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadReconstructionRevision(reader) : null;
+    }
+
+    public void RecordReconstructionLaneFrame(ReconstructionLaneFrameCatalogRecord frame)
+    {
+        ArgumentNullException.ThrowIfNull(frame);
+        ValidateReconstructionLaneFrame(frame);
+        if (frame.ArtifactPath is not null)
+        {
+            ValidateRelativeArtifactPath(frame.ArtifactPath);
+        }
+
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        var revision = GetReconstructionRevision(
+            connection,
+            frame.ExperimentRunId,
+            frame.Lane,
+            frame.RevisionId) ?? throw new KeyNotFoundException(
+                $"Reconstruction revision {frame.Lane}/{frame.RevisionId} does not exist.");
+        if (revision.IsPublished)
+        {
+            throw new InvalidOperationException("Published reconstruction revision frames are immutable.");
+        }
+
+        if (!string.Equals(
+                revision.AlgorithmFingerprint,
+                frame.AlgorithmFingerprint,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("Frame algorithm fingerprint does not match its revision.");
+        }
+
+        ExecuteNonQuery(
+            connection,
+            """
+            INSERT INTO reconstruction_lane_frames(
+                experiment_run_id, lane, revision_id, source_block_number,
+                sequence_number, outcome, acquired_at_utc, processed_at_utc,
+                algorithm_fingerprint, artifact_path, dataset_path, final_weight_hash,
+                kalman_session_id, kalman_disposition, presentation_json, exclusion_reason)
+            VALUES(
+                $experiment_run_id, $lane, $revision_id, $source_block_number,
+                $sequence_number, $outcome, $acquired_at_utc, $processed_at_utc,
+                $algorithm_fingerprint, $artifact_path, $dataset_path, $final_weight_hash,
+                $kalman_session_id, $kalman_disposition, $presentation_json, $exclusion_reason)
+            ON CONFLICT(experiment_run_id, lane, revision_id, source_block_number) DO UPDATE SET
+                sequence_number = excluded.sequence_number,
+                outcome = excluded.outcome,
+                acquired_at_utc = excluded.acquired_at_utc,
+                processed_at_utc = excluded.processed_at_utc,
+                algorithm_fingerprint = excluded.algorithm_fingerprint,
+                artifact_path = excluded.artifact_path,
+                dataset_path = excluded.dataset_path,
+                final_weight_hash = excluded.final_weight_hash,
+                kalman_session_id = excluded.kalman_session_id,
+                kalman_disposition = excluded.kalman_disposition,
+                presentation_json = excluded.presentation_json,
+                exclusion_reason = excluded.exclusion_reason;
+            """,
+            ("$experiment_run_id", frame.ExperimentRunId.ToString("D")),
+            ("$lane", frame.Lane),
+            ("$revision_id", frame.RevisionId),
+            ("$source_block_number", frame.SourceBlockNumber),
+            ("$sequence_number", frame.SequenceNumber),
+            ("$outcome", frame.Outcome),
+            ("$acquired_at_utc", Format(frame.AcquiredAt)),
+            ("$processed_at_utc", Format(frame.ProcessedAt)),
+            ("$algorithm_fingerprint", frame.AlgorithmFingerprint),
+            ("$artifact_path", frame.ArtifactPath),
+            ("$dataset_path", frame.DatasetPath),
+            ("$final_weight_hash", frame.FinalWeightHash),
+            ("$kalman_session_id", frame.KalmanSessionId),
+            ("$kalman_disposition", frame.KalmanDisposition),
+            ("$presentation_json", frame.PresentationJson),
+            ("$exclusion_reason", frame.ExclusionReason));
+        RefreshReconstructionRevisionCounts(
+            connection,
+            frame.ExperimentRunId,
+            frame.Lane,
+            frame.RevisionId,
+            frame.ProcessedAt);
+        transaction.Commit();
+    }
+
+    public IReadOnlyList<ReconstructionLaneFrameCatalogRecord> ListReconstructionLaneFrames(
+        Guid experimentRunId,
+        string lane,
+        string revisionId)
+    {
+        ValidateLaneIdentity(lane, revisionId);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT experiment_run_id, lane, revision_id, source_block_number,
+                   sequence_number, outcome, acquired_at_utc, processed_at_utc,
+                   algorithm_fingerprint, artifact_path, dataset_path, final_weight_hash,
+                   kalman_session_id, kalman_disposition, presentation_json, exclusion_reason
+            FROM reconstruction_lane_frames
+            WHERE experiment_run_id = $experiment_run_id
+              AND lane = $lane
+              AND revision_id = $revision_id
+            ORDER BY sequence_number, source_block_number;
+            """;
+        command.Parameters.AddWithValue("$experiment_run_id", experimentRunId.ToString("D"));
+        command.Parameters.AddWithValue("$lane", lane);
+        command.Parameters.AddWithValue("$revision_id", revisionId);
+        using var reader = command.ExecuteReader();
+        var frames = new List<ReconstructionLaneFrameCatalogRecord>();
+        while (reader.Read())
+        {
+            frames.Add(ReadReconstructionLaneFrame(reader));
+        }
+
+        return frames;
+    }
+
+    public ReconstructionLaneFrameCatalogRecord? GetReconstructionLaneFrame(
+        Guid experimentRunId,
+        string lane,
+        string revisionId,
+        int sourceBlockNumber)
+    {
+        ValidateLaneIdentity(lane, revisionId);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(sourceBlockNumber);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT experiment_run_id, lane, revision_id, source_block_number,
+                   sequence_number, outcome, acquired_at_utc, processed_at_utc,
+                   algorithm_fingerprint, artifact_path, dataset_path, final_weight_hash,
+                   kalman_session_id, kalman_disposition, presentation_json, exclusion_reason
+            FROM reconstruction_lane_frames
+            WHERE experiment_run_id = $experiment_run_id
+              AND lane = $lane
+              AND revision_id = $revision_id
+              AND source_block_number = $source_block_number;
+            """;
+        command.Parameters.AddWithValue("$experiment_run_id", experimentRunId.ToString("D"));
+        command.Parameters.AddWithValue("$lane", lane);
+        command.Parameters.AddWithValue("$revision_id", revisionId);
+        command.Parameters.AddWithValue("$source_block_number", sourceBlockNumber);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadReconstructionLaneFrame(reader) : null;
+    }
+
+    public ReconstructionRevisionCatalogRecord PublishReconstructionRevision(
+        Guid experimentRunId,
+        string lane,
+        string revisionId,
+        long rawDenominator,
+        int demodDenominator,
+        DateTimeOffset publishedAt)
+    {
+        ValidateLaneIdentity(lane, revisionId);
+        ArgumentOutOfRangeException.ThrowIfNegative(rawDenominator);
+        ArgumentOutOfRangeException.ThrowIfNegative(demodDenominator);
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        var revision = GetReconstructionRevision(connection, experimentRunId, lane, revisionId)
+            ?? throw new KeyNotFoundException($"Reconstruction revision {lane}/{revisionId} does not exist.");
+        if (revision.IsPublished)
+        {
+            return revision;
+        }
+
+        var counts = ReadReconstructionLaneCounts(connection, experimentRunId, lane, revisionId);
+        if (counts.Terminal != demodDenominator ||
+            counts.Terminal != counts.Reconstructed + counts.Neutral + counts.Excluded)
+        {
+            throw new InvalidOperationException(
+                $"Revision cannot publish before complete coverage: {counts.Terminal}/{demodDenominator} terminal outcomes.");
+        }
+
+        ExecuteNonQuery(
+            connection,
+            """
+            UPDATE reconstruction_revisions
+            SET status = $published,
+                raw_denominator = $raw_denominator,
+                demod_denominator = $demod_denominator,
+                terminal_outcome_count = $terminal_outcome_count,
+                reconstructed_count = $reconstructed_count,
+                neutral_count = $neutral_count,
+                excluded_count = $excluded_count,
+                updated_at_utc = $published_at_utc,
+                published_at_utc = $published_at_utc,
+                failure_message = NULL
+            WHERE experiment_run_id = $experiment_run_id
+              AND lane = $lane
+              AND revision_id = $revision_id;
+            """,
+            ("$published", ReconstructionRevisionStatus.Published),
+            ("$raw_denominator", rawDenominator),
+            ("$demod_denominator", demodDenominator),
+            ("$terminal_outcome_count", counts.Terminal),
+            ("$reconstructed_count", counts.Reconstructed),
+            ("$neutral_count", counts.Neutral),
+            ("$excluded_count", counts.Excluded),
+            ("$published_at_utc", Format(publishedAt)),
+            ("$experiment_run_id", experimentRunId.ToString("D")),
+            ("$lane", lane),
+            ("$revision_id", revisionId));
+        transaction.Commit();
+        return GetReconstructionRevision(experimentRunId, lane, revisionId)!;
+    }
+
+    public void SetReconstructionRevisionStatus(
+        Guid experimentRunId,
+        string lane,
+        string revisionId,
+        string status,
+        DateTimeOffset updatedAt,
+        string? failureMessage = null)
+    {
+        ValidateLaneIdentity(lane, revisionId);
+        if (!ReconstructionRevisionStatus.IsKnown(status) ||
+            string.Equals(status, ReconstructionRevisionStatus.Published, StringComparison.Ordinal))
+        {
+            throw new ArgumentOutOfRangeException(nameof(status), status, "Use publish for published revisions.");
+        }
+
+        using var connection = OpenConnection();
+        ExecuteNonQuery(
+            connection,
+            """
+            UPDATE reconstruction_revisions
+            SET status = $status,
+                updated_at_utc = $updated_at_utc,
+                failure_message = $failure_message
+            WHERE experiment_run_id = $experiment_run_id
+              AND lane = $lane
+              AND revision_id = $revision_id
+              AND status <> $published;
+            """,
+            ("$status", status),
+            ("$updated_at_utc", Format(updatedAt)),
+            ("$failure_message", failureMessage),
+            ("$experiment_run_id", experimentRunId.ToString("D")),
+            ("$lane", lane),
+            ("$revision_id", revisionId),
+            ("$published", ReconstructionRevisionStatus.Published));
     }
 
     public void RegisterReferenceEpoch(ExperimentReferenceEpochCatalogRecord epoch)
@@ -1125,6 +1556,8 @@ public sealed class ExperimentCatalog
                  {
                      "experiment_exports",
                      "reference_epochs",
+                     "reconstruction_lane_frames",
+                     "reconstruction_revisions",
                      "derived_artifacts",
                      "processing_blocks",
                      "raw_segments",
@@ -1438,6 +1871,11 @@ public sealed class ExperimentCatalog
                  WHERE experiment_run_id = $experiment_run_id AND NOT (
                      artifact_path = $prefix OR
                      substr(artifact_path, 1, length($prefix) + 1) = $prefix || $separator)) +
+                (SELECT COUNT(*) FROM reconstruction_lane_frames
+                 WHERE experiment_run_id = $experiment_run_id
+                   AND artifact_path IS NOT NULL AND NOT (
+                     artifact_path = $prefix OR
+                     substr(artifact_path, 1, length($prefix) + 1) = $prefix || $separator)) +
                 (SELECT COUNT(*) FROM reference_epochs
                  WHERE experiment_run_id = $experiment_run_id AND NOT (
                      artifact_path = $prefix OR
@@ -1468,6 +1906,7 @@ public sealed class ExperimentCatalog
     {
         RewriteArtifactPrefix(connection, "raw_segments", "artifact_path", experimentRunId, oldPrefix, newPrefix);
         RewriteArtifactPrefix(connection, "derived_artifacts", "artifact_path", experimentRunId, oldPrefix, newPrefix);
+        RewriteArtifactPrefix(connection, "reconstruction_lane_frames", "artifact_path", experimentRunId, oldPrefix, newPrefix);
         RewriteArtifactPrefix(connection, "reference_epochs", "artifact_path", experimentRunId, oldPrefix, newPrefix);
         RewriteArtifactPrefix(connection, "experiment_exports", "source_artifact_path", experimentRunId, oldPrefix, newPrefix);
         RewriteArtifactPrefix(connection, "experiment_exports", "artifact_path", experimentRunId, oldPrefix, newPrefix);
@@ -1526,6 +1965,9 @@ public sealed class ExperimentCatalog
                 SELECT 1 FROM derived_artifacts
                 WHERE experiment_run_id=$experiment_run_id AND artifact_path=$artifact_path
                 UNION ALL
+                SELECT 1 FROM reconstruction_lane_frames
+                WHERE experiment_run_id=$experiment_run_id AND artifact_path=$artifact_path
+                UNION ALL
                 SELECT 1 FROM reference_epochs
                 WHERE experiment_run_id=$experiment_run_id AND artifact_path=$artifact_path
             );
@@ -1560,6 +2002,158 @@ public sealed class ExperimentCatalog
         }
 
         ValidateRelativeArtifactPath(artifact.ArtifactPath);
+    }
+
+    private static ReconstructionRevisionCatalogRecord? GetReconstructionRevision(
+        SqliteConnection connection,
+        Guid experimentRunId,
+        string lane,
+        string revisionId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT experiment_run_id, lane, revision_id, status, algorithm_fingerprint,
+                   raw_denominator, demod_denominator, terminal_outcome_count,
+                   reconstructed_count, neutral_count, excluded_count,
+                   estimated_incremental_bytes, created_at_utc, updated_at_utc,
+                   published_at_utc, failure_message
+            FROM reconstruction_revisions
+            WHERE experiment_run_id = $experiment_run_id
+              AND lane = $lane
+              AND revision_id = $revision_id;
+            """;
+        command.Parameters.AddWithValue("$experiment_run_id", experimentRunId.ToString("D"));
+        command.Parameters.AddWithValue("$lane", lane);
+        command.Parameters.AddWithValue("$revision_id", revisionId);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadReconstructionRevision(reader) : null;
+    }
+
+    private static void RefreshReconstructionRevisionCounts(
+        SqliteConnection connection,
+        Guid experimentRunId,
+        string lane,
+        string revisionId,
+        DateTimeOffset updatedAt)
+    {
+        var counts = ReadReconstructionLaneCounts(connection, experimentRunId, lane, revisionId);
+        ExecuteNonQuery(
+            connection,
+            """
+            UPDATE reconstruction_revisions
+            SET terminal_outcome_count = $terminal,
+                reconstructed_count = $reconstructed,
+                neutral_count = $neutral,
+                excluded_count = $excluded,
+                updated_at_utc = $updated_at_utc
+            WHERE experiment_run_id = $experiment_run_id
+              AND lane = $lane
+              AND revision_id = $revision_id;
+            """,
+            ("$terminal", counts.Terminal),
+            ("$reconstructed", counts.Reconstructed),
+            ("$neutral", counts.Neutral),
+            ("$excluded", counts.Excluded),
+            ("$updated_at_utc", Format(updatedAt)),
+            ("$experiment_run_id", experimentRunId.ToString("D")),
+            ("$lane", lane),
+            ("$revision_id", revisionId));
+    }
+
+    private static (int Terminal, int Reconstructed, int Neutral, int Excluded)
+        ReadReconstructionLaneCounts(
+            SqliteConnection connection,
+            Guid experimentRunId,
+            string lane,
+            string revisionId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT COUNT(*),
+                   SUM(CASE WHEN outcome = $reconstructed THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN outcome = $neutral THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN outcome IN ($no_reference, $invalid, $discontinuity)
+                            THEN 1 ELSE 0 END)
+            FROM reconstruction_lane_frames
+            WHERE experiment_run_id = $experiment_run_id
+              AND lane = $lane
+              AND revision_id = $revision_id;
+            """;
+        command.Parameters.AddWithValue("$reconstructed", ReconstructionFrameOutcome.Reconstructed);
+        command.Parameters.AddWithValue("$neutral", ReconstructionFrameOutcome.Neutral);
+        command.Parameters.AddWithValue("$no_reference", ReconstructionFrameOutcome.ExcludedNoReference);
+        command.Parameters.AddWithValue("$invalid", ReconstructionFrameOutcome.ExcludedInvalid);
+        command.Parameters.AddWithValue("$discontinuity", ReconstructionFrameOutcome.ExcludedDiscontinuity);
+        command.Parameters.AddWithValue("$experiment_run_id", experimentRunId.ToString("D"));
+        command.Parameters.AddWithValue("$lane", lane);
+        command.Parameters.AddWithValue("$revision_id", revisionId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return (0, 0, 0, 0);
+        }
+
+        return (
+            reader.GetInt32(0),
+            reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+            reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+            reader.IsDBNull(3) ? 0 : reader.GetInt32(3));
+    }
+
+    private static void ValidateReconstructionRevision(ReconstructionRevisionCatalogRecord revision)
+    {
+        ValidateLaneIdentity(revision.Lane, revision.RevisionId);
+        if (!ReconstructionRevisionStatus.IsKnown(revision.Status) ||
+            string.IsNullOrWhiteSpace(revision.AlgorithmFingerprint) ||
+            revision.RawDenominator < 0 ||
+            revision.DemodDenominator < 0 ||
+            revision.TerminalOutcomeCount < 0 ||
+            revision.ReconstructedCount < 0 ||
+            revision.NeutralCount < 0 ||
+            revision.ExcludedCount < 0 ||
+            revision.EstimatedIncrementalBytes < 0 ||
+            revision.TerminalOutcomeCount !=
+            revision.ReconstructedCount + revision.NeutralCount + revision.ExcludedCount ||
+            (revision.IsPublished &&
+             (revision.PublishedAt is null ||
+              revision.DemodDenominator != revision.TerminalOutcomeCount)))
+        {
+            throw new ArgumentException("Reconstruction revision state is invalid.", nameof(revision));
+        }
+    }
+
+    private static void ValidateReconstructionLaneFrame(ReconstructionLaneFrameCatalogRecord frame)
+    {
+        ValidateLaneIdentity(frame.Lane, frame.RevisionId);
+        if (frame.SourceBlockNumber <= 0 ||
+            frame.SequenceNumber <= 0 ||
+            !ReconstructionFrameOutcome.IsKnown(frame.Outcome) ||
+            string.IsNullOrWhiteSpace(frame.AlgorithmFingerprint) ||
+            ((frame.ArtifactPath is null) != (frame.DatasetPath is null)) ||
+            (string.Equals(frame.Outcome, ReconstructionFrameOutcome.Reconstructed, StringComparison.Ordinal) &&
+             (string.IsNullOrWhiteSpace(frame.ArtifactPath) || string.IsNullOrWhiteSpace(frame.DatasetPath))) ||
+            (ReconstructionFrameOutcome.IsExcluded(frame.Outcome) &&
+             string.IsNullOrWhiteSpace(frame.ExclusionReason)))
+        {
+            throw new ArgumentException("Reconstruction lane frame state is invalid.", nameof(frame));
+        }
+    }
+
+    private static void ValidateLaneIdentity(string lane, string revisionId)
+    {
+        if (!ReconstructionLane.IsKnown(lane))
+        {
+            throw new ArgumentOutOfRangeException(nameof(lane), lane, "Unknown reconstruction lane.");
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(revisionId);
+        if (revisionId.Length > 80 ||
+            revisionId.Any(character => char.IsControl(character) || character is '/' or '\\'))
+        {
+            throw new ArgumentException("Reconstruction revision id is invalid.", nameof(revisionId));
+        }
     }
 
     private static void RecordDemodPlaceholder(SqliteConnection connection, ProcessingBlockCatalogRecord block)
@@ -1640,6 +2234,48 @@ public sealed class ExperimentCatalog
             reader.IsDBNull(11) ? null : reader.GetString(11),
             reader.GetString(12),
             reader.IsDBNull(13) ? null : Parse(reader.GetString(13)));
+    }
+
+    private static ReconstructionRevisionCatalogRecord ReadReconstructionRevision(SqliteDataReader reader)
+    {
+        return new ReconstructionRevisionCatalogRecord(
+            Guid.Parse(reader.GetString(0)),
+            reader.GetString(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            reader.GetString(4),
+            reader.GetInt64(5),
+            reader.GetInt32(6),
+            reader.GetInt32(7),
+            reader.GetInt32(8),
+            reader.GetInt32(9),
+            reader.GetInt32(10),
+            reader.GetInt64(11),
+            Parse(reader.GetString(12)),
+            Parse(reader.GetString(13)),
+            reader.IsDBNull(14) ? null : Parse(reader.GetString(14)),
+            reader.IsDBNull(15) ? null : reader.GetString(15));
+    }
+
+    private static ReconstructionLaneFrameCatalogRecord ReadReconstructionLaneFrame(SqliteDataReader reader)
+    {
+        return new ReconstructionLaneFrameCatalogRecord(
+            Guid.Parse(reader.GetString(0)),
+            reader.GetString(1),
+            reader.GetString(2),
+            reader.GetInt32(3),
+            reader.GetInt32(4),
+            reader.GetString(5),
+            Parse(reader.GetString(6)),
+            Parse(reader.GetString(7)),
+            reader.GetString(8),
+            reader.IsDBNull(9) ? null : reader.GetString(9),
+            reader.IsDBNull(10) ? null : reader.GetString(10),
+            reader.IsDBNull(11) ? null : reader.GetString(11),
+            reader.IsDBNull(12) ? null : reader.GetString(12),
+            reader.IsDBNull(13) ? null : reader.GetString(13),
+            reader.IsDBNull(14) ? null : reader.GetString(14),
+            reader.IsDBNull(15) ? null : reader.GetString(15));
     }
 
     private static RawSegmentCatalogRecord ReadRawSegment(SqliteDataReader reader)
