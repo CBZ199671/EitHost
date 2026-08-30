@@ -27,13 +27,13 @@ internal sealed class ExperimentRunLifecycleController
     private readonly DataRootLayout dataLayout;
     private readonly ExperimentCatalog experimentCatalog;
     private readonly ExperimentDemodCatchUpService demodCatchUpService;
-    private readonly ExperimentReconstructionCatchUpService reconstructionCatchUpService;
+    private readonly ExperimentOfflineCompleteService offlineCompleteService;
     private readonly ExperimentRunOperationGate operationGate;
     private readonly Guid sessionId;
     private readonly ExperimentRunLifecycleCallbacks callbacks;
     private readonly object catchUpGate = new();
     private readonly HashSet<Guid> queuedCatchUpRuns = [];
-    private readonly SemaphoreSlim reconstructionCatchUpGate = new(1, 1);
+    private readonly SemaphoreSlim offlineCompleteGate = new(1, 1);
     private CancellationTokenSource? catchUpCancellation;
 
     internal bool IsCatchUpRunning
@@ -48,8 +48,8 @@ internal sealed class ExperimentRunLifecycleController
     }
 
     /// <summary>
-    /// Requests that offline catch-up stops after the block it is working on. Every block is
-    /// committed independently, so the remainder simply stays pending for a later retry.
+    /// Requests that the manual offline-complete job stops after its current block. Its staged
+    /// revision remains resumable and is never exposed as a published replay lane.
     /// </summary>
     internal void CancelCatchUp()
     {
@@ -66,7 +66,7 @@ internal sealed class ExperimentRunLifecycleController
         DataRootLayout dataLayout,
         ExperimentCatalog experimentCatalog,
         ExperimentDemodCatchUpService demodCatchUpService,
-        ExperimentReconstructionCatchUpService reconstructionCatchUpService,
+        ExperimentOfflineCompleteService offlineCompleteService,
         ExperimentRunOperationGate operationGate,
         Guid sessionId,
         ExperimentRunLifecycleCallbacks callbacks)
@@ -74,7 +74,7 @@ internal sealed class ExperimentRunLifecycleController
         this.dataLayout = dataLayout ?? throw new ArgumentNullException(nameof(dataLayout));
         this.experimentCatalog = experimentCatalog ?? throw new ArgumentNullException(nameof(experimentCatalog));
         this.demodCatchUpService = demodCatchUpService ?? throw new ArgumentNullException(nameof(demodCatchUpService));
-        this.reconstructionCatchUpService = reconstructionCatchUpService ?? throw new ArgumentNullException(nameof(reconstructionCatchUpService));
+        this.offlineCompleteService = offlineCompleteService ?? throw new ArgumentNullException(nameof(offlineCompleteService));
         this.operationGate = operationGate ?? throw new ArgumentNullException(nameof(operationGate));
         this.sessionId = sessionId;
         this.callbacks = callbacks ?? throw new ArgumentNullException(nameof(callbacks));
@@ -200,11 +200,6 @@ internal sealed class ExperimentRunLifecycleController
                 $"status={(failure is null ? ExperimentCatalog.CompletedStatus : ExperimentCatalog.FailedStatus)} " +
                 $"raw={rawStatus} demod={demodStatus} reconstruction={reconstructionStatus}");
             callbacks.RefreshRuns();
-            if ((config.PersistRawAcquisitionHdf5 && demodStatus is not "complete") ||
-                (config.PersistImagingFrames && reconstructionStatus is not ("complete" or "not_requested")))
-            {
-                QueueCatchUp(config.ImagingRunId, config.SetLabel, "run-stop");
-            }
         }
         catch (Exception ex)
         {
@@ -274,6 +269,9 @@ internal sealed class ExperimentRunLifecycleController
         _ = RunCatchUpAsync(experimentRunId, setLabel, reason, operationLease);
     }
 
+    internal OfflineCompletePreflight PreflightOfflineComplete(Guid experimentRunId) =>
+        offlineCompleteService.Preflight(experimentRunId);
+
     private async Task RunCatchUpAsync(
         Guid experimentRunId,
         string setLabel,
@@ -290,23 +288,35 @@ internal sealed class ExperimentRunLifecycleController
             update => callbacks.PublishCatchUpProgress(DescribeProgress(setLabel, update)));
         try
         {
-            callbacks.PublishCatchUpProgress($"{setLabel} 离线追赶：正在准备…");
+            callbacks.PublishCatchUpProgress($"{setLabel} 离线完整重算：正在补齐原始解调…");
             var report = await Task
                 .Run(
                     () => demodCatchUpService.Run(experimentRunId, progress, cancellation.Token),
                     cancellation.Token)
                 .ConfigureAwait(false);
-            ExperimentReconstructionCatchUpReport reconstructionReport;
-            await reconstructionCatchUpGate.WaitAsync(cancellation.Token).ConfigureAwait(false);
+            RefreshPipelineManifestInputs(experimentRunId, setLabel);
+            var preflight = offlineCompleteService.Preflight(experimentRunId);
+            if (!preflight.CanStart)
+            {
+                callbacks.RunDiagnostic(
+                    experimentRunId,
+                    $"{setLabel} offline-complete unavailable {reason} run={experimentRunId:D}: {preflight.Reason}");
+                callbacks.RefreshRuns();
+                callbacks.PublishStatus($"{setLabel} 无法等价生成离线完整回放：{preflight.Reason}");
+                return;
+            }
+
+            OfflineCompleteReport reconstructionReport;
+            await offlineCompleteGate.WaitAsync(cancellation.Token).ConfigureAwait(false);
             try
             {
-                reconstructionReport = await reconstructionCatchUpService
+                reconstructionReport = await offlineCompleteService
                     .RunAsync(experimentRunId, progress, cancellation.Token)
                     .ConfigureAwait(false);
             }
             finally
             {
-                reconstructionCatchUpGate.Release();
+                offlineCompleteGate.Release();
             }
 
             callbacks.RunDiagnostic(
@@ -315,34 +325,33 @@ internal sealed class ExperimentRunLifecycleController
                 $"skipped={report.SkippedBlockCount} discardedRows={report.DiscardedRawRows} " +
                 $"pendingRows={report.PendingRawRows} failures={report.FailedBlockCount} " +
                 $"missingSegments={report.MissingSegmentCount} status={report.DemodStatus}; " +
-                $"reconRecovered={reconstructionReport.RecoveredBlockCount} imported={reconstructionReport.ImportedExistingCount} " +
-                $"reconPending={reconstructionReport.PendingBlockCount} reconFailures={reconstructionReport.FailedBlockCount} " +
-                $"reconStatus={reconstructionReport.ReconstructionStatus}");
+                $"offlineRevision={reconstructionReport.RevisionId} published={reconstructionReport.Published} " +
+                $"reconstructed={reconstructionReport.ReconstructedCount} neutral={reconstructionReport.NeutralCount} " +
+                $"excluded={reconstructionReport.ExcludedCount} status={reconstructionReport.Status}");
             callbacks.RefreshRuns();
             callbacks.PublishStatus(
                 report.PendingRawRows == 0 &&
                 report.FailedBlockCount == 0 &&
-                reconstructionReport.PendingBlockCount == 0 &&
-                reconstructionReport.FailedBlockCount == 0
-                    ? $"{setLabel} 离线追赶完成：解调补齐 {report.RecoveredBlockCount} 块，重构补齐 {reconstructionReport.RecoveredBlockCount} 块。"
-                    : $"{setLabel} 离线追赶结束：raw 待解调 {report.PendingRawRows} 行；重构待处理 {reconstructionReport.PendingBlockCount} 块，失败 {reconstructionReport.FailedBlockCount} 块。");
+                reconstructionReport.Published
+                    ? $"{setLabel} 离线完整版本已发布：解调补齐 {report.RecoveredBlockCount} 块；" +
+                      $"重构 {reconstructionReport.ReconstructedCount} 帧，中性 {reconstructionReport.NeutralCount} 帧，" +
+                      $"排除 {reconstructionReport.ExcludedCount} 帧。"
+                    : $"{setLabel} 离线完整重算未发布：{reconstructionReport.UnavailableReason ?? reconstructionReport.Status}");
         }
         catch (OperationCanceledException)
         {
-            // Blocks commit one at a time, so the untouched remainder stays pending and the
-            // operator can rerun catch-up later without duplicating work.
             callbacks.RunDiagnostic(
                 experimentRunId,
                 $"{setLabel} catch-up canceled {reason} run={experimentRunId:D}");
             callbacks.PublishStatus(
-                $"{setLabel} 离线追赶已取消；未处理部分仍标记为待处理，可稍后用“补齐所选”继续。");
+                $"{setLabel} 离线完整重算已取消；暂存 revision 未发布，可稍后继续。");
         }
         catch (Exception ex)
         {
             callbacks.RunDiagnostic(
                 experimentRunId,
                 $"{setLabel} catch-up failed {reason} run={experimentRunId:D}: {ex}");
-            callbacks.PublishStatus($"{setLabel} 离线追赶失败：{ex.Message}");
+            callbacks.PublishStatus($"{setLabel} 离线完整重算失败：{ex.Message}");
         }
         finally
         {
@@ -362,11 +371,32 @@ internal sealed class ExperimentRunLifecycleController
 
     private static string DescribeProgress(string setLabel, ExperimentCatchUpProgress update)
     {
-        var phase = update.Phase == ExperimentCatchUpPhase.Demodulating ? "补解调" : "补重构";
+        var phase = update.Phase == ExperimentCatchUpPhase.Demodulating ? "补解调" : "完整重构";
         var unit = update.Phase == ExperimentCatchUpPhase.Demodulating ? "段" : "块";
         return update.TotalUnits <= 0
-            ? $"{setLabel} 离线追赶 · {phase}：无待处理{unit}。"
-            : $"{setLabel} 离线追赶 · {phase} {update.CompletedUnits}/{update.TotalUnits} {unit}" +
+            ? $"{setLabel} 离线完整重算 · {phase}：无待处理{unit}。"
+            : $"{setLabel} 离线完整重算 · {phase} {update.CompletedUnits}/{update.TotalUnits} {unit}" +
               $"（{update.CompletedFraction:P0}）";
+    }
+
+    private void RefreshPipelineManifestInputs(Guid experimentRunId, string setLabel)
+    {
+        var current = experimentCatalog.GetPipelineManifest(experimentRunId);
+        if (current is null)
+        {
+            return;
+        }
+
+        var refreshed = ReconstructionPipelineManifestFactory.Finalize(
+            current,
+            experimentCatalog,
+            dataLayout,
+            DateTimeOffset.UtcNow);
+        experimentCatalog.SavePipelineManifest(refreshed);
+        callbacks.Diagnostic(
+            $"{setLabel} pipeline manifest refreshed after manual demod status={refreshed.Status}" +
+            (string.IsNullOrWhiteSpace(refreshed.UnavailableReason)
+                ? string.Empty
+                : $" reason={refreshed.UnavailableReason}"));
     }
 }

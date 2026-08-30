@@ -845,6 +845,52 @@ public sealed class ExperimentCatalog
         return GetReconstructionRevision(experimentRunId, lane, revisionId)!;
     }
 
+    public void PromoteReconstructionRevisionArtifacts(
+        Guid experimentRunId,
+        string lane,
+        string revisionId,
+        string stagingRelativeDirectory,
+        string publishedRelativeDirectory,
+        DateTimeOffset updatedAt)
+    {
+        ValidateLaneIdentity(lane, revisionId);
+        ValidateRelativeArtifactPath(stagingRelativeDirectory);
+        ValidateRelativeArtifactPath(publishedRelativeDirectory);
+        var stagingPrefix = stagingRelativeDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                            Path.DirectorySeparatorChar;
+        var publishedPrefix = publishedRelativeDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                              Path.DirectorySeparatorChar;
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        var revision = GetReconstructionRevision(connection, experimentRunId, lane, revisionId)
+            ?? throw new KeyNotFoundException($"Reconstruction revision {lane}/{revisionId} does not exist.");
+        if (revision.IsPublished)
+        {
+            transaction.Commit();
+            return;
+        }
+
+        ExecuteNonQuery(
+            connection,
+            """
+            UPDATE reconstruction_lane_frames
+            SET artifact_path = $published_prefix || substr(artifact_path, length($staging_prefix) + 1),
+                processed_at_utc = $updated_at_utc
+            WHERE experiment_run_id = $experiment_run_id
+              AND lane = $lane
+              AND revision_id = $revision_id
+              AND artifact_path LIKE $staging_like;
+            """,
+            ("$published_prefix", publishedPrefix),
+            ("$staging_prefix", stagingPrefix),
+            ("$staging_like", stagingPrefix + "%"),
+            ("$updated_at_utc", Format(updatedAt)),
+            ("$experiment_run_id", experimentRunId.ToString("D")),
+            ("$lane", lane),
+            ("$revision_id", revisionId));
+        transaction.Commit();
+    }
+
     public void SetReconstructionRevisionStatus(
         Guid experimentRunId,
         string lane,

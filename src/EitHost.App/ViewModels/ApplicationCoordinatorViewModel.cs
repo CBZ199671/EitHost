@@ -364,7 +364,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
             dataLayout,
             experimentCatalog,
             derivedArtifactHdf5Writer);
-        var experimentReconstructionCatchUpService = new ExperimentReconstructionCatchUpService(
+        var experimentOfflineCompleteService = new ExperimentOfflineCompleteService(
             dataLayout,
             experimentCatalog,
             backendController,
@@ -373,7 +373,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
             dataLayout,
             experimentCatalog,
             experimentDemodCatchUpService,
-            experimentReconstructionCatchUpService,
+            experimentOfflineCompleteService,
             experimentRunOperationGate,
             currentSessionId,
             new ExperimentRunLifecycleCallbacks(
@@ -2265,10 +2265,6 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
         StatusMessage = result.RecoveredRunCount == 0
             ? $"统一数据根目录已准备：{DataRootPath}{recoverySummary}"
             : $"统一数据根目录已准备：{DataRootPath}{recoverySummary}；已恢复标记 {result.RecoveredRunCount} 条中断实验。";
-        foreach (var run in result.InterruptedRuns)
-        {
-            experimentRunLifecycle.QueueCatchUp(run.ExperimentRunId, run.SetLabel, "startup-recovery");
-        }
     }
 
     private void ApplyDataStoreInitializationFailure(Exception exception)
@@ -2306,12 +2302,6 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
     public void SetRoiCenterFromImagePoint(double x, double y, double width, double height)
     {
         VisualizationWorkspace.SetRoiCenterFromImagePoint(x, y, width, height);
-    }
-    private static string SanitizeFileNameComponent(string value)
-    {
-        var invalid = Path.GetInvalidFileNameChars();
-        var safe = string.Concat(value.Select(ch => invalid.Contains(ch) ? '_' : ch));
-        return string.IsNullOrWhiteSpace(safe) ? "unnamed" : safe;
     }
 
     private static bool ConfirmExperimentLifecycle(string title, string message)

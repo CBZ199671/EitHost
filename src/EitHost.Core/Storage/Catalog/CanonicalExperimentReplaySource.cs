@@ -196,7 +196,10 @@ public sealed class CanonicalExperimentReplaySource
                 metadata.WindowSkewMilliseconds,
                 metadata.SwitchSkewMilliseconds,
                 metadata.SynchronizedSetCount,
-                index.LockedStartSampleIndex));
+                index.LockedStartSampleIndex,
+                file.LinkExists("/reference/noise_precision_weight_208")
+                    ? file.Dataset("/reference/noise_precision_weight_208").Read<double[]>()
+                    : null));
         }
 
         return epochs;

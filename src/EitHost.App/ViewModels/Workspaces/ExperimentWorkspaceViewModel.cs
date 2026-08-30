@@ -11,7 +11,7 @@ namespace EitHost.App.ViewModels.Workspaces;
 public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExperimentWorkspaceViewModel
 {
     private const string LifecycleCatchUpBusyMessage =
-        "离线追赶正在处理数据；请先停止追赶并等待状态消失，或等待追赶完成。";
+        "离线完整重算正在处理数据；请先停止并等待状态消失，或等待重算完成。";
     private ExperimentRunLifecycleController? runLifecycleController;
     private RawAcquisitionPersistenceController? rawAcquisitionPersistenceController;
     private const int RecentRunQueryLimit = 500;
@@ -916,12 +916,41 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
     {
         if (selectedExperimentRun?.Run is not { } run || !IsTerminalExperimentRun(run))
         {
-            UpdateStatus("仅终态 catalog-v2 实验可以补齐；录制中的实验必须先停止。", "unavailable");
+            UpdateStatus("仅终态 catalog-v2 实验可以生成离线完整回放；录制中的实验必须先停止。", "unavailable");
+            return;
+        }
+
+        var coverage = experimentCatalog.GetCoverage(run.ExperimentRunId);
+        var preflight = runLifecycleController?.PreflightOfflineComplete(run.ExperimentRunId) ??
+            new OfflineCompletePreflight(
+                run.ExperimentRunId,
+                true,
+                "preflight delegated at execution",
+                coverage.RawSampleRows,
+                0,
+                coverage.DemodReadyCount,
+                0,
+                (long)coverage.DemodReadyCount * 512L * 1024L,
+                -1,
+                null,
+                null);
+        var available = preflight.AvailableBytes < 0 ? "未知" : FormatStorageBytes(preflight.AvailableBytes);
+        var message =
+            $"将为 {run.SetLabel} 手动执行完整离线链：先补齐解调，再按原始时间顺序使用已记录权重策略和独立动态 Kalman 重算。\n\n" +
+            $"原始数据：{preflight.RawSampleRows:N0} 行 / {FormatStorageBytes(preflight.RawArtifactBytes)}\n" +
+            $"当前解调块：{preflight.DemodBlockCount:N0}\n" +
+            $"预计新增：{FormatStorageBytes(preflight.EstimatedIncrementalBytes)}；磁盘可用：{available}\n" +
+            (preflight.ResumableRevisionId is null
+                ? "将创建新的暂存 revision。"
+                : $"将继续暂存 revision：{preflight.ResumableRevisionId}") +
+            "\n\n中途取消不会覆盖实时回放，也不会发布不完整结果。是否继续？";
+        if (!lifecycleConfirmation("生成离线完整回放", message))
+        {
             return;
         }
 
         reconciliationScheduler(run.ExperimentRunId, run.SetLabel, "operator-request");
-        UpdateStatus($"{run.SetLabel} 已进入离线追赶队列：先补解调，再补可重构帧。", "processing");
+        UpdateStatus($"{run.SetLabel} 已进入离线完整重算队列：暂存完成并校验后才会发布。", "processing");
     }
 
     private IReadOnlyList<EitCatalogRunSummary> LoadLegacyRecentRuns()

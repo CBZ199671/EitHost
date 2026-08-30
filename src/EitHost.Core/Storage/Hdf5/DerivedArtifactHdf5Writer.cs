@@ -272,7 +272,8 @@ public sealed class DerivedArtifactHdf5Writer
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
         ArgumentNullException.ThrowIfNull(applyStage);
         var fullPath = Path.GetFullPath(filePath);
-        var blockRoot = DataRootLayout.IsCanonicalDerivedShardPath(fullPath)
+        var blockRoot = DataRootLayout.IsCanonicalDerivedShardPath(fullPath) ||
+                        DataRootLayout.IsCanonicalOfflineDerivedShardPath(fullPath)
             ? DataRootLayout.GetDerivedBlockRoot(identity.BlockNumber)
             : string.Empty;
         var lockIndex = (int)((uint)StringComparer.OrdinalIgnoreCase.GetHashCode(fullPath) %
