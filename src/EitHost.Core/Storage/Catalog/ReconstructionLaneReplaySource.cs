@@ -100,12 +100,32 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
         if (laneFrame.ArtifactPath is { } artifactPath && laneFrame.DatasetPath is { } datasetPath)
         {
             using var file = Hdf5FileAccess.OpenReadWithRetry(layout.ResolveArtifactPath(artifactPath));
-            if (!file.LinkExists(datasetPath))
+            var conductivityPath = ResolveConductivityDatasetPath(datasetPath, blockNumber);
+            if (!file.LinkExists(conductivityPath))
             {
-                throw new InvalidDataException($"Lane artifact dataset is missing for block {blockNumber}.");
+                throw new InvalidDataException(
+                    $"Lane artifact conductivity dataset is missing for block {blockNumber}: {conductivityPath}.");
             }
 
-            conductivity = file.Dataset(datasetPath).Read<double[]>();
+            try
+            {
+                conductivity = file.Dataset(conductivityPath).Read<double[]>();
+            }
+            catch (Exception ex) when (
+                ex is InvalidCastException ||
+                ex.Message.Contains("cannot be casted to IH5Dataset", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    $"Lane artifact conductivity path is not a dataset for block {blockNumber}: {conductivityPath}.",
+                    ex);
+            }
+
+            if (conductivity.Length == 0 || conductivity.Any(value => !double.IsFinite(value)))
+            {
+                throw new InvalidDataException(
+                    $"Lane artifact conductivity dataset is empty or non-finite for block {blockNumber}: {conductivityPath}.");
+            }
+
             var blockRoot = DataRootLayout.GetDerivedBlockRoot(blockNumber);
             rawConductivity = ReadOptional<double[]>(file, $"{blockRoot}/reconstruction/raw_conductivity");
             weights = ReadOptional<double[]>(file, $"{blockRoot}/input/measurement_weight_208") ?? weights;
@@ -145,6 +165,15 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
             ReconstructionExclusionReason = laneFrame.ExclusionReason,
             ReconstructionAlgorithmFingerprint = laneFrame.AlgorithmFingerprint
         };
+    }
+
+    private static string ResolveConductivityDatasetPath(string recordedPath, int blockNumber)
+    {
+        var normalized = recordedPath.TrimEnd('/');
+        var historicalGroupPath = DataRootLayout.GetDerivedDatasetPath(blockNumber, "/reconstruction");
+        return string.Equals(normalized, historicalGroupPath, StringComparison.Ordinal)
+            ? DataRootLayout.GetDerivedDatasetPath(blockNumber, "/reconstruction/conductivity")
+            : recordedPath;
     }
 
     private static T? ReadOptional<T>(IH5Group file, string path) =>

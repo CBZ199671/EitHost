@@ -2328,6 +2328,9 @@ public sealed class ExperimentCatalog
             ((frame.ArtifactPath is null) != (frame.DatasetPath is null)) ||
             (string.Equals(frame.Outcome, ReconstructionFrameOutcome.Reconstructed, StringComparison.Ordinal) &&
              (string.IsNullOrWhiteSpace(frame.ArtifactPath) || string.IsNullOrWhiteSpace(frame.DatasetPath))) ||
+            (string.Equals(frame.Outcome, ReconstructionFrameOutcome.Reconstructed, StringComparison.Ordinal) &&
+             frame.Lane is ReconstructionLane.Live or ReconstructionLane.OfflineComplete &&
+             !IsConductivityDatasetPath(frame.DatasetPath)) ||
             (ReconstructionFrameOutcome.IsExcluded(frame.Outcome) &&
              string.IsNullOrWhiteSpace(frame.ExclusionReason)) ||
             ((frame.SourceStartSampleIndex is null) != (frame.SourceEndSampleIndex is null)) ||
@@ -2345,6 +2348,9 @@ public sealed class ExperimentCatalog
             throw new ArgumentException("Reconstruction lane frame state is invalid.", nameof(frame));
         }
     }
+
+    private static bool IsConductivityDatasetPath(string? path) =>
+        path?.EndsWith("/reconstruction/conductivity", StringComparison.Ordinal) == true;
 
     private static void ValidateLaneIdentity(string lane, string revisionId)
     {

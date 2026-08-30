@@ -493,7 +493,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
             processedAt,
             manifest.AlgorithmFingerprint,
             dataLayout.ToRelativeArtifactPath(path),
-            DataRootLayout.GetDerivedDatasetPath(block.BlockNumber, "/reconstruction"),
+            DataRootLayout.GetDerivedDatasetPath(block.BlockNumber, "/reconstruction/conductivity"),
             HashDoubles(measurementWeights),
             HashDoubles(result.Conductivity),
             dynamicKalman.SessionId,
