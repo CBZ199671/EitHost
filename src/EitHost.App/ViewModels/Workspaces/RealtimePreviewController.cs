@@ -439,15 +439,17 @@ internal sealed class RealtimePreviewController
         var lowConfidence = !renderNeutral &&
             item.ImageQualityScore is { } quality &&
             quality < LowImageQualityThreshold;
+        var imagePolarity = VisualizationRenderer.NormalizeRealtimeImagePolarity(callbacks.ImagePolarity());
+        var imageGain = Math.Clamp(callbacks.ImageGain(), 0.1, 5.0);
+        VisualizationRenderer.RealtimeRenderedImage? rendered = null;
         var image = renderNeutral
             ? state.ImageRasterCache.RenderNeutral(item.ContactResult?.States, ImageRenderPixelSize)
-            : VisualizationRenderer.RenderReconstructionImageCached(
+            : (rendered = state.ImageRasterCache.RenderWithPresentation(
                 result,
-                callbacks.ImagePolarity(),
-                callbacks.ImageGain(),
+                imagePolarity,
+                imageGain,
                 item.ContactResult?.States,
-                state.ImageRasterCache,
-                ImageRenderPixelSize);
+                ImageRenderPixelSize)).Image;
         var renderMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         state.RenderEwmaMilliseconds = state.RenderEwmaMilliseconds <= 0.0
             ? renderMilliseconds
@@ -501,9 +503,23 @@ internal sealed class RealtimePreviewController
 
         stats += $" · {state.ReconstructionCadence.TargetFramesPerSecond:F1}/{(displayFps > 0.0 ? displayFps : 0.0):F1}fps";
         Volatile.Write(ref state.LastReconImageStatsTicks, Environment.TickCount64);
+        var liveCommit = item.PersistedLiveEvidence is { } evidence
+            ? new RealtimeLiveFrameCommit(
+                evidence,
+                new RealtimeImagePresentationEvidence(
+                    RendererVersion: "realtime-raster-v2",
+                    Colormap: "blue-white-red-v1",
+                    Polarity: imagePolarity,
+                    Gain: imageGain,
+                    ScaleCenter: rendered?.ColorScale?.Center,
+                    ScaleRange: rendered?.ColorScale?.Range,
+                    OverlayDisposition: renderNeutral ? "neutral" : "conductivity",
+                    LowConfidence: lowConfidence,
+                    Stats: stats))
+            : null;
         PublishImage(
             config.SetLabel,
-            new RealtimeImagePreviewSnapshot(image, stats, lowConfidence),
+            new RealtimeImagePreviewSnapshot(image, stats, lowConfidence, liveCommit),
             ComposeImagingSummary(config.SetLabel, state));
     }
 

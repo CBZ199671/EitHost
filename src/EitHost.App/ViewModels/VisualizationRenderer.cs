@@ -520,13 +520,28 @@ internal static class VisualizationRenderer
             IReadOnlyList<ElectrodeContactState>? electrodeStates,
             int imagePixelSize = VisualizationGeometry.DefaultImagePixelSize)
         {
+            return RenderWithPresentation(
+                result,
+                imagePolarity,
+                imageGain,
+                electrodeStates,
+                imagePixelSize).Image;
+        }
+
+        public RealtimeRenderedImage RenderWithPresentation(
+            RealtimeReconstructionResult result,
+            string imagePolarity,
+            double imageGain,
+            IReadOnlyList<ElectrodeContactState>? electrodeStates,
+            int imagePixelSize = VisualizationGeometry.DefaultImagePixelSize)
+        {
             lock (renderGate)
             {
                 return RenderCore(result, imagePolarity, imageGain, electrodeStates, imagePixelSize);
             }
         }
 
-        private ImageSource RenderCore(
+        private RealtimeRenderedImage RenderCore(
             RealtimeReconstructionResult result,
             string imagePolarity,
             double imageGain,
@@ -538,9 +553,11 @@ internal static class VisualizationRenderer
             EnsureRaster(result.NodeCoords, result.CellConnectivity, edge);
             var pixels = RentFrameBuffer(edge);
             Array.Fill(pixels, BackgroundColor);
+            RealtimeImageColorScaleSnapshot? appliedScale = null;
             if (cellByPixel is not null && result.Conductivity.Length > 0)
             {
                 var scale = colorScale.Update(result.Conductivity);
+                appliedScale = scale;
                 var center = scale.Center;
                 var range = scale.Range;
 
@@ -577,7 +594,7 @@ internal static class VisualizationRenderer
                 edge,
                 edge,
                 electrodeStates);
-            return CreateBitmap(pixels, edge, edge);
+            return new RealtimeRenderedImage(CreateBitmap(pixels, edge, edge), appliedScale);
         }
 
         public ImageSource RenderNeutral(
@@ -718,5 +735,9 @@ internal static class VisualizationRenderer
             return hash;
         }
     }
+
+    internal sealed record RealtimeRenderedImage(
+        ImageSource Image,
+        RealtimeImageColorScaleSnapshot? ColorScale);
 
 }

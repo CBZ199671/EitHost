@@ -36,7 +36,8 @@ internal sealed class RealtimePreviewPresenter(VisualizationWorkspaceViewModel w
                 RoiReadinessStatus: "ROI 就绪：否 · 等待参考与重构",
                 ReferenceInvalidated: false,
                 LowConfidenceImage: false,
-                []);
+                [],
+                LiveFrameCommit: null);
         }
 
         if (cache.Raw is { } raw)
@@ -113,7 +114,8 @@ internal sealed class RealtimePreviewPresenter(VisualizationWorkspaceViewModel w
             cache.RoiReadinessStatus ?? "ROI 就绪：否 · 等待参考与重构",
             cache.ReferenceInvalidated,
             lowConfidence,
-            []);
+            [],
+            LiveFrameCommit: null);
     }
 
     internal RealtimePreviewUiUpdate ApplyPending(RealtimePreviewPendingBatch pending)
@@ -171,7 +173,8 @@ internal sealed class RealtimePreviewPresenter(VisualizationWorkspaceViewModel w
             pending.RoiReadinessStatus,
             pending.ReferenceInvalidated,
             lowConfidence,
-            pending.LogLines);
+            pending.LogLines,
+            pending.Image?.LiveFrameCommit);
     }
 
     internal void ApplyDemod(RealtimeDemodPreviewSnapshot demod)
@@ -260,4 +263,5 @@ internal sealed record RealtimePreviewUiUpdate(
     string? RoiReadinessStatus,
     bool? ReferenceInvalidated,
     bool? LowConfidenceImage,
-    IReadOnlyList<string> LogLines);
+    IReadOnlyList<string> LogLines,
+    RealtimeLiveFrameCommit? LiveFrameCommit);

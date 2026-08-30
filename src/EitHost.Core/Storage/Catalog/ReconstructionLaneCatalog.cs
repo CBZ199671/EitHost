@@ -81,7 +81,10 @@ public sealed record ReconstructionLaneFrameCatalogRecord(
     string? KalmanSessionId = null,
     string? KalmanDisposition = null,
     string? PresentationJson = null,
-    string? ExclusionReason = null);
+    string? ExclusionReason = null,
+    long? SourceStartSampleIndex = null,
+    long? SourceEndSampleIndex = null,
+    string? ResultHash = null);
 
 public sealed record ReconstructionLaneCoverage(
     string Lane,

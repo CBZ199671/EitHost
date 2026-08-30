@@ -1,4 +1,10 @@
+using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
 using EitHost.Core.Application.Realtime;
 using EitHost.Core.Demodulation;
 using EitHost.Core.Diagnostics;
@@ -13,6 +19,11 @@ namespace EitHost.App.ViewModels.Workspaces;
 internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
 {
     private const int DerivedPersistenceQueueCapacity = 128;
+    private const string LiveRevisionId = "live-v1";
+    private static readonly JsonSerializerOptions EvidenceJsonOptions = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
     private readonly DataRootLayout dataLayout;
     private readonly ExperimentCatalog catalog;
     private readonly DerivedArtifactHdf5Writer writer;
@@ -20,6 +31,8 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
     private readonly Action<string> diagnostic;
     private readonly Action<string> backendArchiveWarning;
     private readonly RealtimePersistenceQueue<DerivedPersistenceWork> derivedPersistenceQueue;
+    private readonly SemaphoreSlim liveCommitGate = new(1, 1);
+    private readonly ConcurrentDictionary<(Guid RunId, int BlockNumber), Task> pendingLiveCommits = new();
 
     internal RealtimeDerivedPersistenceController(
         DataRootLayout dataLayout,
@@ -109,7 +122,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         }
     }
 
-    internal async Task PersistReconstructionResultAsync(
+    internal async Task<RealtimePersistedLiveFrameEvidence?> PersistReconstructionResultAsync(
         RealtimeImagingRunConfig config,
         RealtimeRunState state,
         RealtimeDemodulatedBlock block,
@@ -119,13 +132,24 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         IReadOnlyList<double> target,
         IReadOnlyList<double> measurementWeights,
         string weightPolicyVersion,
-        string? dynamicKalmanSessionId)
+        RealtimeDynamicKalmanOptions? dynamicKalman)
     {
         if (!config.PersistImagingFrames || !state.ExperimentCatalogRunStarted)
         {
-            return;
+            return null;
         }
 
+        var processedAt = DateTimeOffset.UtcNow;
+        var persistenceReady = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var liveEvidence = CreateLiveEvidence(
+            config,
+            state,
+            block,
+            result,
+            measurementWeights,
+            dynamicKalman,
+            processedAt,
+            persistenceReady.Task);
         await EnqueuePersistenceAsync(
             () => PersistReconstructionResultCoreAsync(
                 config,
@@ -137,7 +161,12 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
                 target,
                 measurementWeights,
                 weightPolicyVersion,
-                dynamicKalmanSessionId)).ConfigureAwait(false);
+                dynamicKalman,
+                processedAt,
+                liveEvidence,
+                persistenceReady),
+            () => persistenceReady.TrySetResult(false)).ConfigureAwait(false);
+        return liveEvidence;
     }
 
     private async Task PersistReconstructionResultCoreAsync(
@@ -150,15 +179,18 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         IReadOnlyList<double> target,
         IReadOnlyList<double> measurementWeights,
         string weightPolicyVersion,
-        string? dynamicKalmanSessionId)
+        RealtimeDynamicKalmanOptions? dynamicKalman,
+        DateTimeOffset processedAt,
+        RealtimePersistedLiveFrameEvidence? liveEvidence,
+        TaskCompletionSource<bool> persistenceReady)
     {
         if (!config.PersistImagingFrames || !state.ExperimentCatalogRunStarted)
         {
+            persistenceReady.TrySetResult(false);
             return;
         }
 
         var acquiredAt = CalculateBlockAcquiredAt(config, state, block);
-        var processedAt = DateTimeOffset.UtcNow;
         var processingRecord = CreateProcessingBlockRecord(config, block, acquiredAt, processedAt, "ready");
         try
         {
@@ -212,7 +244,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
                     ReferenceVoltage208: reference.ToArray(),
                     TargetVoltage208: target.ToArray(),
                     MeasurementWeight208: measurementWeights.ToArray(),
-                    DynamicKalmanSessionId: dynamicKalmanSessionId,
+                    DynamicKalmanSessionId: result.DynamicKalmanApplied ? dynamicKalman?.SessionId : null,
                     DynamicKalmanAction: result.DynamicKalmanAction,
                     DynamicKalmanNisPerDof: result.DynamicKalmanNisPerDof,
                     DynamicKalmanGainMean: result.DynamicKalmanGainMean,
@@ -234,11 +266,18 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
                     dataLayout.ToRelativeArtifactPath(path),
                     DataRootLayout.GetDerivedDatasetPath(block.BlockNumber, "/reconstruction"),
                     processedAt));
+            if (liveEvidence is not null)
+            {
+                EnsureLiveRevision(liveEvidence);
+            }
+
             Interlocked.Increment(ref state.ReconstructionPersistedBlocks);
             await ArchiveBackendExchangeDiagnosticAsync(config, block, result).ConfigureAwait(false);
+            persistenceReady.TrySetResult(true);
         }
         catch (Exception ex)
         {
+            persistenceReady.TrySetResult(false);
             Interlocked.Increment(ref state.ReconstructionPersistenceFailures);
             await RecordReconstructionFailureAsync(
                 config,
@@ -246,6 +285,227 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
                 block,
                 $"derived persistence failed: {ex.Message}").ConfigureAwait(false);
         }
+    }
+
+    internal Task CommitLivePresentationAsync(RealtimeLiveFrameCommit commit)
+    {
+        ArgumentNullException.ThrowIfNull(commit);
+        var key = (commit.Frame.ExperimentRunId, commit.Frame.SourceBlockNumber);
+        var task = CommitLivePresentationCoreAsync(commit);
+        pendingLiveCommits[key] = task;
+        _ = task.ContinueWith(
+            (_, state) =>
+            {
+                var tuple = ((ConcurrentDictionary<(Guid, int), Task> Dictionary, (Guid, int) Key))state!;
+                tuple.Dictionary.TryRemove(tuple.Key, out Task? _);
+            },
+            (pendingLiveCommits, key),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+        return task;
+    }
+
+    internal async Task PublishLiveRevisionAsync(Guid experimentRunId, long rawDenominator)
+    {
+        var commits = pendingLiveCommits
+            .Where(item => item.Key.RunId == experimentRunId)
+            .Select(item => item.Value)
+            .ToArray();
+        if (commits.Length > 0)
+        {
+            await Task.WhenAll(commits).ConfigureAwait(false);
+        }
+
+        await liveCommitGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            var revision = catalog.GetReconstructionRevision(
+                experimentRunId,
+                ReconstructionLane.Live,
+                LiveRevisionId);
+            if (revision is null || revision.IsPublished)
+            {
+                return;
+            }
+
+            var frames = catalog.ListReconstructionLaneFrames(
+                experimentRunId,
+                ReconstructionLane.Live,
+                LiveRevisionId);
+            catalog.PublishReconstructionRevision(
+                experimentRunId,
+                ReconstructionLane.Live,
+                LiveRevisionId,
+                Math.Max(0, rawDenominator),
+                frames.Count,
+                DateTimeOffset.UtcNow);
+        }
+        finally
+        {
+            liveCommitGate.Release();
+        }
+    }
+
+    private async Task CommitLivePresentationCoreAsync(RealtimeLiveFrameCommit commit)
+    {
+        if (!await commit.Frame.PersistenceReady.ConfigureAwait(false))
+        {
+            diagnostic(
+                $"{commit.Frame.SetLabel} live replay excluded block={commit.Frame.SourceBlockNumber}: reconstruction artifact was not persisted");
+            return;
+        }
+
+        await liveCommitGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (catalog.GetReconstructionLaneFrame(
+                    commit.Frame.ExperimentRunId,
+                    ReconstructionLane.Live,
+                    commit.Frame.RevisionId,
+                    commit.Frame.SourceBlockNumber) is not null)
+            {
+                return;
+            }
+
+            var existing = catalog.ListReconstructionLaneFrames(
+                commit.Frame.ExperimentRunId,
+                ReconstructionLane.Live,
+                commit.Frame.RevisionId);
+            var sequence = existing.Count == 0 ? 1 : existing.Max(item => item.SequenceNumber) + 1;
+            catalog.RecordReconstructionLaneFrame(new ReconstructionLaneFrameCatalogRecord(
+                commit.Frame.ExperimentRunId,
+                ReconstructionLane.Live,
+                commit.Frame.RevisionId,
+                commit.Frame.SourceBlockNumber,
+                sequence,
+                string.Equals(commit.Presentation.OverlayDisposition, "neutral", StringComparison.Ordinal)
+                    ? ReconstructionFrameOutcome.Neutral
+                    : ReconstructionFrameOutcome.Reconstructed,
+                commit.Frame.AcquiredAt,
+                DateTimeOffset.UtcNow,
+                commit.Frame.AlgorithmFingerprint,
+                commit.Frame.ArtifactPath,
+                commit.Frame.DatasetPath,
+                commit.Frame.FinalWeightHash,
+                commit.Frame.KalmanSessionId,
+                commit.Frame.KalmanDisposition,
+                JsonSerializer.Serialize(commit.Presentation, EvidenceJsonOptions),
+                SourceStartSampleIndex: commit.Frame.SourceStartSampleIndex,
+                SourceEndSampleIndex: commit.Frame.SourceEndSampleIndex,
+                ResultHash: commit.Frame.ResultHash));
+        }
+        catch (Exception ex)
+        {
+            diagnostic(
+                $"{commit.Frame.SetLabel} live replay index failed block={commit.Frame.SourceBlockNumber}: {ex.Message}");
+        }
+        finally
+        {
+            liveCommitGate.Release();
+        }
+    }
+
+    private void EnsureLiveRevision(RealtimePersistedLiveFrameEvidence evidence)
+    {
+        var existing = catalog.GetReconstructionRevision(
+            evidence.ExperimentRunId,
+            ReconstructionLane.Live,
+            evidence.RevisionId);
+        if (existing is not null)
+        {
+            if (!string.Equals(
+                    existing.AlgorithmFingerprint,
+                    evidence.AlgorithmFingerprint,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("Live reconstruction algorithm fingerprint changed within one run.");
+            }
+
+            return;
+        }
+
+        catalog.UpsertReconstructionRevision(new ReconstructionRevisionCatalogRecord(
+            evidence.ExperimentRunId,
+            ReconstructionLane.Live,
+            evidence.RevisionId,
+            ReconstructionRevisionStatus.Staged,
+            evidence.AlgorithmFingerprint,
+            RawDenominator: 0,
+            DemodDenominator: 0,
+            TerminalOutcomeCount: 0,
+            ReconstructedCount: 0,
+            NeutralCount: 0,
+            ExcludedCount: 0,
+            EstimatedIncrementalBytes: 0,
+            evidence.ProcessedAt,
+            evidence.ProcessedAt));
+    }
+
+    private RealtimePersistedLiveFrameEvidence? CreateLiveEvidence(
+        RealtimeImagingRunConfig config,
+        RealtimeRunState state,
+        RealtimeDemodulatedBlock block,
+        RealtimeReconstructionResult result,
+        IReadOnlyList<double> measurementWeights,
+        RealtimeDynamicKalmanOptions? dynamicKalman,
+        DateTimeOffset processedAt,
+        Task<bool> persistenceReady)
+    {
+        if (!config.EnableDynamicKalman ||
+            !result.DynamicKalmanApplied ||
+            result.DynamicKalmanFallback == true ||
+            !string.Equals(result.DynamicKalmanAction, "update", StringComparison.Ordinal) ||
+            dynamicKalman is null ||
+            string.IsNullOrWhiteSpace(dynamicKalman.SessionId))
+        {
+            return null;
+        }
+
+        var path = dataLayout.GetDerivedBlockPath(
+            config.ImagingRunId,
+            state.ExperimentStartedAt,
+            block.BlockNumber);
+        return new RealtimePersistedLiveFrameEvidence(
+            config.SetLabel,
+            config.ImagingRunId,
+            LiveRevisionId,
+            block.BlockNumber,
+            block.StartSampleIndex,
+            block.EndSampleIndex,
+            CalculateBlockAcquiredAt(config, state, block),
+            processedAt,
+            CreateLiveAlgorithmFingerprint(config, dynamicKalman),
+            dataLayout.ToRelativeArtifactPath(path),
+            DataRootLayout.GetDerivedDatasetPath(block.BlockNumber, "/reconstruction"),
+            HashDoubles(measurementWeights),
+            HashDoubles(result.Conductivity),
+            dynamicKalman.SessionId,
+            "updated",
+            state.ReferenceEpoch,
+            persistenceReady);
+    }
+
+    private static string CreateLiveAlgorithmFingerprint(
+        RealtimeImagingRunConfig config,
+        RealtimeDynamicKalmanOptions dynamicKalman)
+    {
+        var canonical = FormattableString.Invariant(
+            $"live-v1;route={config.ReconstructionRoute};backend={config.BackendProfile};mesh={config.MeshSize:G17};lambda={config.DifferenceLambda:G17};custom={config.CustomLambdaEnabled};orientation={config.DifferenceOrientation};dynamic-policy={config.DynamicKalmanMode};latency={dynamicKalman.UpstreamLatencyFrames};process={dynamicKalman.ProcessNoiseRelativeStd:G17};measurement={dynamicKalman.MeasurementNoiseRelativeStd:G17};initial={dynamicKalman.InitialRelativeStd:G17};decay={dynamicKalman.TransitionDecayPerBlock:G17};gate={dynamicKalman.InnovationGate};nis={dynamicKalman.NisThresholdPerDof:G17};inflation={dynamicKalman.MaxVarianceInflation:G17}");
+        return "sha256:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+    }
+
+    private static string HashDoubles(IReadOnlyList<double> values)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Span<byte> buffer = stackalloc byte[sizeof(long)];
+        foreach (var value in values)
+        {
+            BinaryPrimitives.WriteInt64LittleEndian(buffer, BitConverter.DoubleToInt64Bits(value));
+            hash.AppendData(buffer);
+        }
+
+        return "sha256:" + Convert.ToHexStringLower(hash.GetHashAndReset());
     }
 
     internal async Task PersistFrameDiagnosticsAsync(
@@ -417,7 +677,11 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         derivedPersistenceQueue.ThrowIfFaulted();
     }
 
-    public ValueTask DisposeAsync() => derivedPersistenceQueue.DisposeAsync();
+    public async ValueTask DisposeAsync()
+    {
+        await derivedPersistenceQueue.DisposeAsync().ConfigureAwait(false);
+        liveCommitGate.Dispose();
+    }
 
     internal void PersistReferenceEpoch(
         RealtimeImagingRunConfig config,

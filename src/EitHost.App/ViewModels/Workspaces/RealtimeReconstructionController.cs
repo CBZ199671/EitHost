@@ -273,7 +273,7 @@ internal sealed class RealtimeReconstructionController
             null);
         callbacks.PublishPseudo3dLayer(config.SetLabel, result, acquiredAt);
 
-        await persistence.PersistReconstructionResultAsync(
+        var persistedLiveEvidence = await persistence.PersistReconstructionResultAsync(
             config,
             state,
             block,
@@ -283,7 +283,7 @@ internal sealed class RealtimeReconstructionController
             target,
             measurementWeights,
             weightPolicyVersion,
-            result.DynamicKalmanApplied ? dynamicKalman?.SessionId : null).ConfigureAwait(false);
+            dynamicKalman).ConfigureAwait(false);
         var renderBoundaryFit = callbacks.ShouldRenderBoundaryFit(state);
         var renderImage = callbacks.ShouldRenderImage(state);
         if ((renderBoundaryFit || renderImage) &&
@@ -299,7 +299,8 @@ internal sealed class RealtimeReconstructionController
                 renderImage,
                 state.ReferenceEpoch,
                 degradedStatus,
-                boundaryChangeDecision)) != true)
+                boundaryChangeDecision,
+                PersistedLiveEvidence: persistedLiveEvidence)) != true)
         {
             callbacks.Diagnostic($"{config.SetLabel} visualization rejected block={result.BlockNumber}");
         }

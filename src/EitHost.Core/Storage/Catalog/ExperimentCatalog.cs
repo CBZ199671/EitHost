@@ -7,7 +7,7 @@ namespace EitHost.Core.Storage.Catalog;
 
 public sealed class ExperimentCatalog
 {
-    public const int CurrentSchemaVersion = 6;
+    public const int CurrentSchemaVersion = 7;
     public const string RecordingStatus = "recording";
     public const string CompletedStatus = "completed";
     public const string InterruptedStatus = "interrupted";
@@ -177,6 +177,9 @@ public sealed class ExperimentCatalog
                 kalman_disposition TEXT NULL,
                 presentation_json TEXT NULL,
                 exclusion_reason TEXT NULL,
+                source_start_sample_index INTEGER NULL,
+                source_end_sample_index INTEGER NULL,
+                result_hash TEXT NULL,
                 PRIMARY KEY(experiment_run_id, lane, revision_id, source_block_number),
                 UNIQUE(experiment_run_id, lane, revision_id, sequence_number),
                 FOREIGN KEY(experiment_run_id, lane, revision_id)
@@ -242,6 +245,21 @@ public sealed class ExperimentCatalog
             connection,
             "experiment_runs",
             "archived_at_utc",
+            "TEXT NULL");
+        AddColumnIfMissing(
+            connection,
+            "reconstruction_lane_frames",
+            "source_start_sample_index",
+            "INTEGER NULL");
+        AddColumnIfMissing(
+            connection,
+            "reconstruction_lane_frames",
+            "source_end_sample_index",
+            "INTEGER NULL");
+        AddColumnIfMissing(
+            connection,
+            "reconstruction_lane_frames",
+            "result_hash",
             "TEXT NULL");
         ExecuteNonQuery(
             connection,
@@ -558,12 +576,14 @@ public sealed class ExperimentCatalog
                 experiment_run_id, lane, revision_id, source_block_number,
                 sequence_number, outcome, acquired_at_utc, processed_at_utc,
                 algorithm_fingerprint, artifact_path, dataset_path, final_weight_hash,
-                kalman_session_id, kalman_disposition, presentation_json, exclusion_reason)
+                kalman_session_id, kalman_disposition, presentation_json, exclusion_reason,
+                source_start_sample_index, source_end_sample_index, result_hash)
             VALUES(
                 $experiment_run_id, $lane, $revision_id, $source_block_number,
                 $sequence_number, $outcome, $acquired_at_utc, $processed_at_utc,
                 $algorithm_fingerprint, $artifact_path, $dataset_path, $final_weight_hash,
-                $kalman_session_id, $kalman_disposition, $presentation_json, $exclusion_reason)
+                $kalman_session_id, $kalman_disposition, $presentation_json, $exclusion_reason,
+                $source_start_sample_index, $source_end_sample_index, $result_hash)
             ON CONFLICT(experiment_run_id, lane, revision_id, source_block_number) DO UPDATE SET
                 sequence_number = excluded.sequence_number,
                 outcome = excluded.outcome,
@@ -576,7 +596,10 @@ public sealed class ExperimentCatalog
                 kalman_session_id = excluded.kalman_session_id,
                 kalman_disposition = excluded.kalman_disposition,
                 presentation_json = excluded.presentation_json,
-                exclusion_reason = excluded.exclusion_reason;
+                exclusion_reason = excluded.exclusion_reason,
+                source_start_sample_index = excluded.source_start_sample_index,
+                source_end_sample_index = excluded.source_end_sample_index,
+                result_hash = excluded.result_hash;
             """,
             ("$experiment_run_id", frame.ExperimentRunId.ToString("D")),
             ("$lane", frame.Lane),
@@ -593,7 +616,10 @@ public sealed class ExperimentCatalog
             ("$kalman_session_id", frame.KalmanSessionId),
             ("$kalman_disposition", frame.KalmanDisposition),
             ("$presentation_json", frame.PresentationJson),
-            ("$exclusion_reason", frame.ExclusionReason));
+            ("$exclusion_reason", frame.ExclusionReason),
+            ("$source_start_sample_index", frame.SourceStartSampleIndex),
+            ("$source_end_sample_index", frame.SourceEndSampleIndex),
+            ("$result_hash", frame.ResultHash));
         RefreshReconstructionRevisionCounts(
             connection,
             frame.ExperimentRunId,
@@ -616,7 +642,8 @@ public sealed class ExperimentCatalog
             SELECT experiment_run_id, lane, revision_id, source_block_number,
                    sequence_number, outcome, acquired_at_utc, processed_at_utc,
                    algorithm_fingerprint, artifact_path, dataset_path, final_weight_hash,
-                   kalman_session_id, kalman_disposition, presentation_json, exclusion_reason
+                   kalman_session_id, kalman_disposition, presentation_json, exclusion_reason,
+                   source_start_sample_index, source_end_sample_index, result_hash
             FROM reconstruction_lane_frames
             WHERE experiment_run_id = $experiment_run_id
               AND lane = $lane
@@ -651,7 +678,8 @@ public sealed class ExperimentCatalog
             SELECT experiment_run_id, lane, revision_id, source_block_number,
                    sequence_number, outcome, acquired_at_utc, processed_at_utc,
                    algorithm_fingerprint, artifact_path, dataset_path, final_weight_hash,
-                   kalman_session_id, kalman_disposition, presentation_json, exclusion_reason
+                   kalman_session_id, kalman_disposition, presentation_json, exclusion_reason,
+                   source_start_sample_index, source_end_sample_index, result_hash
             FROM reconstruction_lane_frames
             WHERE experiment_run_id = $experiment_run_id
               AND lane = $lane
@@ -2135,7 +2163,18 @@ public sealed class ExperimentCatalog
             (string.Equals(frame.Outcome, ReconstructionFrameOutcome.Reconstructed, StringComparison.Ordinal) &&
              (string.IsNullOrWhiteSpace(frame.ArtifactPath) || string.IsNullOrWhiteSpace(frame.DatasetPath))) ||
             (ReconstructionFrameOutcome.IsExcluded(frame.Outcome) &&
-             string.IsNullOrWhiteSpace(frame.ExclusionReason)))
+             string.IsNullOrWhiteSpace(frame.ExclusionReason)) ||
+            ((frame.SourceStartSampleIndex is null) != (frame.SourceEndSampleIndex is null)) ||
+            (frame.SourceStartSampleIndex is { } sourceStart &&
+             (sourceStart < 0 || frame.SourceEndSampleIndex <= sourceStart)) ||
+            (string.Equals(frame.Lane, ReconstructionLane.Live, StringComparison.Ordinal) &&
+             (frame.Outcome is not (ReconstructionFrameOutcome.Reconstructed or ReconstructionFrameOutcome.Neutral) ||
+              string.IsNullOrWhiteSpace(frame.FinalWeightHash) ||
+              string.IsNullOrWhiteSpace(frame.ResultHash) ||
+              string.IsNullOrWhiteSpace(frame.KalmanSessionId) ||
+              !string.Equals(frame.KalmanDisposition, "updated", StringComparison.Ordinal) ||
+              string.IsNullOrWhiteSpace(frame.PresentationJson) ||
+              frame.SourceStartSampleIndex is null)))
         {
             throw new ArgumentException("Reconstruction lane frame state is invalid.", nameof(frame));
         }
@@ -2275,7 +2314,10 @@ public sealed class ExperimentCatalog
             reader.IsDBNull(12) ? null : reader.GetString(12),
             reader.IsDBNull(13) ? null : reader.GetString(13),
             reader.IsDBNull(14) ? null : reader.GetString(14),
-            reader.IsDBNull(15) ? null : reader.GetString(15));
+            reader.IsDBNull(15) ? null : reader.GetString(15),
+            reader.IsDBNull(16) ? null : reader.GetInt64(16),
+            reader.IsDBNull(17) ? null : reader.GetInt64(17),
+            reader.IsDBNull(18) ? null : reader.GetString(18));
     }
 
     private static RawSegmentCatalogRecord ReadRawSegment(SqliteDataReader reader)

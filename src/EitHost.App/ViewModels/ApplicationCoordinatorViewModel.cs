@@ -2537,6 +2537,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
             }
 
             FlushRealtimePreviewSnapshots();
+            _ = FinalizeLiveReplayAsync(config.ImagingRunId, state.TotalRawSamples, config.SetLabel);
             realtimePreview.StopPump();
             AddPanelLog(RealtimeImagingLogs, $"{DateTime.Now:HH:mm:ss} {config.SetLabel} realtime imaging stopped");
             RaiseRunStateChanged();
@@ -2932,6 +2933,28 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
         foreach (var line in update.LogLines)
         {
             AddPanelLog(RealtimeImagingLogs, line);
+        }
+
+        if (update.LiveFrameCommit is { } liveCommit &&
+            IsRealtimeDisplaySet(liveCommit.Frame.SetLabel))
+        {
+            _ = derivedPersistence.CommitLivePresentationAsync(liveCommit);
+        }
+    }
+
+    private async Task FinalizeLiveReplayAsync(Guid experimentRunId, long rawDenominator, string setLabel)
+    {
+        try
+        {
+            await derivedPersistence
+                .PublishLiveRevisionAsync(experimentRunId, rawDenominator)
+                .ConfigureAwait(false);
+            PostToUi(() => _ = RefreshImagingRunsAsync());
+        }
+        catch (Exception ex)
+        {
+            PostToUi(() => AddRealtimeDiagnostic(
+                $"{setLabel} live replay finalization failed: {ex.Message}"));
         }
     }
 

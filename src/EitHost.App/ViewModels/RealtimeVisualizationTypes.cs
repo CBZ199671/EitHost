@@ -48,7 +48,42 @@ internal sealed record RealtimeBoundaryFitPreviewSnapshot(
 internal sealed record RealtimeImagePreviewSnapshot(
     ImageSource? Image,
     string Stats,
-    bool LowConfidence = false);
+    bool LowConfidence = false,
+    RealtimeLiveFrameCommit? LiveFrameCommit = null);
+
+internal sealed record RealtimePersistedLiveFrameEvidence(
+    string SetLabel,
+    Guid ExperimentRunId,
+    string RevisionId,
+    int SourceBlockNumber,
+    long SourceStartSampleIndex,
+    long SourceEndSampleIndex,
+    DateTimeOffset AcquiredAt,
+    DateTimeOffset ProcessedAt,
+    string AlgorithmFingerprint,
+    string ArtifactPath,
+    string DatasetPath,
+    string FinalWeightHash,
+    string ResultHash,
+    string KalmanSessionId,
+    string KalmanDisposition,
+    int ReferenceEpoch,
+    Task<bool> PersistenceReady);
+
+internal sealed record RealtimeImagePresentationEvidence(
+    string RendererVersion,
+    string Colormap,
+    string Polarity,
+    double Gain,
+    double? ScaleCenter,
+    double? ScaleRange,
+    string OverlayDisposition,
+    bool LowConfidence,
+    string Stats);
+
+internal sealed record RealtimeLiveFrameCommit(
+    RealtimePersistedLiveFrameEvidence Frame,
+    RealtimeImagePresentationEvidence Presentation);
 
 internal sealed record RealtimeVisualizationWorkItem(
     RealtimeReconstructionResult? Result,
@@ -64,7 +99,8 @@ internal sealed record RealtimeVisualizationWorkItem(
     string? DegradedStatus = null,
     EcdCwrBoundaryChangeDecision? BoundaryChangeDecision = null,
     RealtimeNeutralImagePresentation? NeutralPresentation = null,
-    bool NonReplaceable = false);
+    bool NonReplaceable = false,
+    RealtimePersistedLiveFrameEvidence? PersistedLiveEvidence = null);
 
 internal sealed record RealtimeNeutralImagePresentation(string Stats, string Activity);
 
