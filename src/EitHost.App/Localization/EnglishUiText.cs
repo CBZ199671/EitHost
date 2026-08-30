@@ -331,6 +331,8 @@ internal static partial class EnglishUiText
             ["按处理账本补齐缺失解调与参考锁定后的待重构块；重复执行不会重复写入"] = "Use the processing ledger to fill missing demodulation and post-reference reconstruction blocks. Repeated runs do not duplicate data.",
             ["停止追赶"] = "Stop Catch-up",
             ["在当前块结束后停止；已完成的块保持不变，未处理部分仍标记为待处理"] = "Stop after the current block. Completed blocks remain unchanged and unprocessed blocks remain pending.",
+            ["离线追赶正在处理数据；请先停止追赶并等待状态消失，或等待追赶完成。"] = "Offline catch-up is processing data. Stop catch-up and wait for its status to clear, or wait for it to finish.",
+            ["删除失败；实验目录与 catalog 保持原状或已回滚"] = "Deletion failed; the experiment directory and catalog remain unchanged or were rolled back",
             ["离线处理"] = "Offline Processing",
             ["离线解调"] = "Offline Demodulation",
             ["输入 HDF5"] = "Input HDF5",

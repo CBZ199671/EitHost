@@ -24,14 +24,23 @@ public interface IExperimentDataLifecycleService
     ExperimentDeleteResult Delete(Guid experimentRunId);
 }
 
-public sealed class ExperimentDataLifecycleService(
-    DataRootLayout layout,
-    ExperimentCatalog catalog) : IExperimentDataLifecycleService
+public sealed class ExperimentDataLifecycleService : IExperimentDataLifecycleService
 {
     public const int DefaultRetentionDays = 90;
 
-    private readonly DataRootLayout layout = layout ?? throw new ArgumentNullException(nameof(layout));
-    private readonly ExperimentCatalog catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
+    private readonly DataRootLayout layout;
+    private readonly ExperimentCatalog catalog;
+    private readonly ExperimentRunOperationGate operationGate;
+
+    public ExperimentDataLifecycleService(
+        DataRootLayout layout,
+        ExperimentCatalog catalog,
+        ExperimentRunOperationGate? operationGate = null)
+    {
+        this.layout = layout ?? throw new ArgumentNullException(nameof(layout));
+        this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
+        this.operationGate = operationGate ?? new ExperimentRunOperationGate();
+    }
 
     public ExperimentRunStorageInspection Inspect(
         Guid experimentRunId,
@@ -96,6 +105,9 @@ public sealed class ExperimentDataLifecycleService(
         IProgress<ExperimentArchiveProgress>? progress)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        using var operationLease = operationGate.Enter(
+            experimentRunId,
+            ExperimentRunOperation.Archive);
         var run = GetTerminalRun(experimentRunId);
         if (!string.Equals(
                 run.LifecycleState,
@@ -168,6 +180,9 @@ public sealed class ExperimentDataLifecycleService(
 
     public ExperimentDeleteResult Delete(Guid experimentRunId)
     {
+        using var operationLease = operationGate.Enter(
+            experimentRunId,
+            ExperimentRunOperation.Delete);
         var run = GetTerminalRun(experimentRunId);
         var source = layout.ResolveArtifactPath(run.RunDirectory);
         var inspection = Inspect(experimentRunId, DateTimeOffset.UtcNow);

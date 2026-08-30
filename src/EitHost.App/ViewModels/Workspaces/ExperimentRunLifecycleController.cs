@@ -28,6 +28,7 @@ internal sealed class ExperimentRunLifecycleController
     private readonly ExperimentCatalog experimentCatalog;
     private readonly ExperimentDemodCatchUpService demodCatchUpService;
     private readonly ExperimentReconstructionCatchUpService reconstructionCatchUpService;
+    private readonly ExperimentRunOperationGate operationGate;
     private readonly Guid sessionId;
     private readonly ExperimentRunLifecycleCallbacks callbacks;
     private readonly object catchUpGate = new();
@@ -66,6 +67,7 @@ internal sealed class ExperimentRunLifecycleController
         ExperimentCatalog experimentCatalog,
         ExperimentDemodCatchUpService demodCatchUpService,
         ExperimentReconstructionCatchUpService reconstructionCatchUpService,
+        ExperimentRunOperationGate operationGate,
         Guid sessionId,
         ExperimentRunLifecycleCallbacks callbacks)
     {
@@ -73,6 +75,7 @@ internal sealed class ExperimentRunLifecycleController
         this.experimentCatalog = experimentCatalog ?? throw new ArgumentNullException(nameof(experimentCatalog));
         this.demodCatchUpService = demodCatchUpService ?? throw new ArgumentNullException(nameof(demodCatchUpService));
         this.reconstructionCatchUpService = reconstructionCatchUpService ?? throw new ArgumentNullException(nameof(reconstructionCatchUpService));
+        this.operationGate = operationGate ?? throw new ArgumentNullException(nameof(operationGate));
         this.sessionId = sessionId;
         this.callbacks = callbacks ?? throw new ArgumentNullException(nameof(callbacks));
     }
@@ -209,18 +212,37 @@ internal sealed class ExperimentRunLifecycleController
 
     internal void QueueCatchUp(Guid experimentRunId, string setLabel, string reason)
     {
+        IDisposable operationLease;
         lock (catchUpGate)
         {
             if (!queuedCatchUpRuns.Add(experimentRunId))
             {
                 return;
             }
+
+            try
+            {
+                operationLease = operationGate.Enter(
+                    experimentRunId,
+                    ExperimentRunOperation.OfflineCatchUp);
+            }
+            catch (ExperimentRunOperationConflictException ex)
+            {
+                queuedCatchUpRuns.Remove(experimentRunId);
+                callbacks.PublishStatus(
+                    $"{setLabel} 离线追赶暂未启动：实验正在执行 {ex.ActiveOperation} 操作。");
+                return;
+            }
         }
 
-        _ = RunCatchUpAsync(experimentRunId, setLabel, reason);
+        _ = RunCatchUpAsync(experimentRunId, setLabel, reason, operationLease);
     }
 
-    private async Task RunCatchUpAsync(Guid experimentRunId, string setLabel, string reason)
+    private async Task RunCatchUpAsync(
+        Guid experimentRunId,
+        string setLabel,
+        string reason,
+        IDisposable operationLease)
     {
         using var cancellation = new CancellationTokenSource();
         lock (catchUpGate)
@@ -297,6 +319,7 @@ internal sealed class ExperimentRunLifecycleController
                 }
             }
 
+            operationLease.Dispose();
             callbacks.PublishCatchUpProgress(string.Empty);
         }
     }

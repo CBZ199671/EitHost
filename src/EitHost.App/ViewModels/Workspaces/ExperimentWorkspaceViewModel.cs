@@ -10,6 +10,8 @@ namespace EitHost.App.ViewModels.Workspaces;
 
 public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExperimentWorkspaceViewModel
 {
+    private const string LifecycleCatchUpBusyMessage =
+        "离线追赶正在处理数据；请先停止追赶并等待状态消失，或等待追赶完成。";
     private ExperimentRunLifecycleController? runLifecycleController;
     private RawAcquisitionPersistenceController? rawAcquisitionPersistenceController;
     private const int RecentRunQueryLimit = 500;
@@ -305,6 +307,9 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
             {
                 OnPropertyChanged(nameof(IsCatchUpRunning));
                 CancelCatchUpCommand.RaiseCanExecuteChanged();
+                ArchiveSelectedExperimentCommand.RaiseCanExecuteChanged();
+                DeleteSelectedExperimentCommand.RaiseCanExecuteChanged();
+                ArchiveRetentionCandidatesCommand.RaiseCanExecuteChanged();
             }
         }
     }
@@ -574,13 +579,16 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
     private bool CanArchiveSelectedExperiment()
     {
         return selectedExperimentRun?.Run is { } run &&
+               !IsCatchUpRunning &&
                IsTerminalExperimentRun(run) &&
                string.Equals(run.LifecycleState, ExperimentCatalog.ActiveLifecycleState, StringComparison.Ordinal);
     }
 
     private bool CanDeleteSelectedExperiment()
     {
-        return selectedExperimentRun?.Run is { } run && IsTerminalExperimentRun(run);
+        return !IsCatchUpRunning &&
+               selectedExperimentRun?.Run is { } run &&
+               IsTerminalExperimentRun(run);
     }
 
     private bool CanReconcileSelectedExperiment()
@@ -593,6 +601,7 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
     {
         return catalogReady &&
                !IsRetentionArchiveRunning &&
+               !IsCatchUpRunning &&
                GetRetentionCandidates(DateTimeOffset.Now).Count > 0;
     }
 
@@ -616,6 +625,12 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
 
     private async Task ArchiveRetentionCandidatesAsync()
     {
+        if (IsCatchUpRunning)
+        {
+            UpdateStatus(LifecycleCatchUpBusyMessage, "warning");
+            return;
+        }
+
         var candidates = GetRetentionCandidates(DateTimeOffset.Now);
         if (candidates.Count == 0)
         {
@@ -757,6 +772,12 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
 
     private async Task ArchiveSelectedExperimentAsync()
     {
+        if (IsCatchUpRunning)
+        {
+            UpdateStatus(LifecycleCatchUpBusyMessage, "warning");
+            return;
+        }
+
         if (selectedExperimentRun?.Run is not { } run)
         {
             UpdateStatus("请选择可归档的统一实验记录。", "unavailable");
@@ -788,12 +809,22 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
         }
         catch (Exception ex)
         {
-            UpdateStatus($"归档失败，原实验记录保持不变：{ex.Message}", "error");
+            UpdateStatus(
+                ex is ExperimentRunOperationConflictException
+                    ? LifecycleCatchUpBusyMessage
+                    : $"归档失败，原实验记录保持不变：{ex.Message}",
+                ex is ExperimentRunOperationConflictException ? "warning" : "error");
         }
     }
 
     private async Task DeleteSelectedExperimentAsync()
     {
+        if (IsCatchUpRunning)
+        {
+            UpdateStatus(LifecycleCatchUpBusyMessage, "warning");
+            return;
+        }
+
         if (selectedExperimentRun?.Run is not { } run)
         {
             UpdateStatus("请选择可删除的统一实验记录。", "unavailable");
@@ -830,7 +861,11 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
         }
         catch (Exception ex)
         {
-            UpdateStatus($"删除失败，实验目录与 catalog 已回滚：{ex.Message}", "error");
+            UpdateStatus(
+                ex is ExperimentRunOperationConflictException
+                    ? LifecycleCatchUpBusyMessage
+                    : $"删除失败；实验目录与 catalog 保持原状或已回滚：{ex.Message}",
+                ex is ExperimentRunOperationConflictException ? "warning" : "error");
         }
     }
 

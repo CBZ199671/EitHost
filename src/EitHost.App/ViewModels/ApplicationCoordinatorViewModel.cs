@@ -357,8 +357,9 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
                 StartPostDataStoreInitialization,
                 AddRealtimeDiagnostic));
         var backendExchangeArchiver = new ExperimentBackendExchangeArchiver(dataLayout, experimentCatalog);
+        var experimentRunOperationGate = new ExperimentRunOperationGate();
         var lifecycleService = experimentDataLifecycleService ??
-            new ExperimentDataLifecycleService(dataLayout, experimentCatalog);
+            new ExperimentDataLifecycleService(dataLayout, experimentCatalog, experimentRunOperationGate);
         var experimentDemodCatchUpService = new ExperimentDemodCatchUpService(
             dataLayout,
             experimentCatalog,
@@ -373,6 +374,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
             experimentCatalog,
             experimentDemodCatchUpService,
             experimentReconstructionCatchUpService,
+            experimentRunOperationGate,
             currentSessionId,
             new ExperimentRunLifecycleCallbacks(
                 AddRealtimeDiagnostic,
