@@ -33,6 +33,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
     private readonly RealtimePersistenceQueue<DerivedPersistenceWork> derivedPersistenceQueue;
     private readonly SemaphoreSlim liveCommitGate = new(1, 1);
     private readonly ConcurrentDictionary<(Guid RunId, int BlockNumber), Task> pendingLiveCommits = new();
+    private readonly ConcurrentDictionary<(Guid RunId, int BlockNumber), Task> pendingTrustedNeutralEvidence = new();
 
     internal RealtimeDerivedPersistenceController(
         DataRootLayout dataLayout,
@@ -67,6 +68,82 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
 
         await EnqueuePersistenceAsync(
             () => PersistDemodulatedBlockCoreAsync(config, state, block)).ConfigureAwait(false);
+    }
+
+    internal void QueueTrustedNeutralEvidence(
+        RealtimeDemodulatedBlock block,
+        RealtimeRunState state)
+    {
+        ArgumentNullException.ThrowIfNull(block);
+        ArgumentNullException.ThrowIfNull(state);
+        var config = state.Config;
+        if (config is null ||
+            !config.PersistImagingFrames ||
+            !state.ExperimentCatalogRunStarted ||
+            state.ReferenceEpoch <= 0 ||
+            string.IsNullOrWhiteSpace(state.ActiveReferenceLockKind))
+        {
+            return;
+        }
+
+        var evidence = new RealtimeRoiEvidenceCatalogRecord(
+            config.ImagingRunId,
+            LiveRevisionId,
+            block.BlockNumber,
+            CalculateBlockAcquiredAt(config, state, block),
+            DateTimeOffset.UtcNow,
+            RealtimeRoiEvidenceValueSource.TrustedNeutral,
+            block.QualityWeight,
+            state.ReferenceEpoch,
+            state.ActiveReferenceLockKind,
+            block.StartSampleIndex,
+            block.EndSampleIndex,
+            ModelRelativeValue: 1.0);
+        var key = (evidence.ExperimentRunId, evidence.SourceBlockNumber);
+        var task = PersistTrustedNeutralEvidenceCoreAsync(config.SetLabel, evidence);
+        pendingTrustedNeutralEvidence[key] = task;
+        _ = task.ContinueWith(
+            (_, callbackState) =>
+            {
+                var tuple = ((ConcurrentDictionary<(Guid, int), Task> Dictionary, (Guid, int) Key))callbackState!;
+                tuple.Dictionary.TryRemove(tuple.Key, out Task? _);
+            },
+            (pendingTrustedNeutralEvidence, key),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private async Task PersistTrustedNeutralEvidenceCoreAsync(
+        string setLabel,
+        RealtimeRoiEvidenceCatalogRecord evidence)
+    {
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            await EnqueuePersistenceAsync(
+                () =>
+                {
+                    try
+                    {
+                        catalog.RecordRealtimeRoiEvidence(evidence);
+                        completion.TrySetResult(true);
+                    }
+                    catch (Exception ex)
+                    {
+                        completion.TrySetException(ex);
+                    }
+
+                    return Task.CompletedTask;
+                },
+                () => completion.TrySetCanceled()).ConfigureAwait(false);
+            await completion.Task.ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            diagnostic(
+                $"{setLabel} trusted-neutral ROI evidence failed block={evidence.SourceBlockNumber}: {ex.Message}");
+        }
     }
 
     private async Task PersistDemodulatedBlockCoreAsync(
@@ -348,13 +425,17 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
 
     internal async Task PublishLiveRevisionAsync(Guid experimentRunId, long rawDenominator)
     {
+        var neutralEvidence = pendingTrustedNeutralEvidence
+            .Where(item => item.Key.RunId == experimentRunId)
+            .Select(item => item.Value)
+            .ToArray();
         var commits = pendingLiveCommits
             .Where(item => item.Key.RunId == experimentRunId)
             .Select(item => item.Value)
             .ToArray();
-        if (commits.Length > 0)
+        if (neutralEvidence.Length > 0 || commits.Length > 0)
         {
-            await Task.WhenAll(commits).ConfigureAwait(false);
+            await Task.WhenAll(neutralEvidence.Concat(commits)).ConfigureAwait(false);
         }
 
         await liveCommitGate.WaitAsync().ConfigureAwait(false);

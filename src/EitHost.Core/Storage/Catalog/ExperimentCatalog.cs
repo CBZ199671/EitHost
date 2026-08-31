@@ -7,7 +7,7 @@ namespace EitHost.Core.Storage.Catalog;
 
 public sealed class ExperimentCatalog
 {
-    public const int CurrentSchemaVersion = 9;
+    public const int CurrentSchemaVersion = 10;
     public const string RecordingStatus = "recording";
     public const string CompletedStatus = "completed";
     public const string InterruptedStatus = "interrupted";
@@ -198,6 +198,23 @@ public sealed class ExperimentCatalog
                     REFERENCES reconstruction_revisions(experiment_run_id, lane, revision_id)
                     ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS realtime_roi_evidence (
+                experiment_run_id TEXT NOT NULL,
+                revision_id TEXT NOT NULL,
+                source_block_number INTEGER NOT NULL,
+                acquired_at_utc TEXT NOT NULL,
+                processed_at_utc TEXT NOT NULL,
+                value_source TEXT NOT NULL,
+                quality_weight REAL NOT NULL,
+                reference_epoch INTEGER NOT NULL,
+                reference_lock_kind TEXT NOT NULL,
+                source_start_sample_index INTEGER NOT NULL,
+                source_end_sample_index INTEGER NOT NULL,
+                model_relative_value REAL NOT NULL,
+                PRIMARY KEY(experiment_run_id, revision_id, source_block_number),
+                FOREIGN KEY(experiment_run_id) REFERENCES experiment_runs(experiment_run_id)
+                    ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS reference_epochs (
                 experiment_run_id TEXT NOT NULL,
                 reference_epoch INTEGER NOT NULL,
@@ -307,6 +324,8 @@ public sealed class ExperimentCatalog
                 ON reconstruction_revisions(experiment_run_id, lane, status, published_at_utc DESC);
             CREATE INDEX IF NOT EXISTS idx_reconstruction_lane_frames_sequence
                 ON reconstruction_lane_frames(experiment_run_id, lane, revision_id, sequence_number);
+            CREATE INDEX IF NOT EXISTS idx_realtime_roi_evidence_sequence
+                ON realtime_roi_evidence(experiment_run_id, revision_id, acquired_at_utc, source_block_number);
             """);
         SetUserVersion(connection, CurrentSchemaVersion);
         transaction.Commit();
@@ -782,6 +801,84 @@ public sealed class ExperimentCatalog
         command.Parameters.AddWithValue("$source_block_number", sourceBlockNumber);
         using var reader = command.ExecuteReader();
         return reader.Read() ? ReadReconstructionLaneFrame(reader) : null;
+    }
+
+    public void RecordRealtimeRoiEvidence(RealtimeRoiEvidenceCatalogRecord evidence)
+    {
+        ArgumentNullException.ThrowIfNull(evidence);
+        ValidateRealtimeRoiEvidence(evidence);
+        using var connection = OpenConnection();
+        ExecuteNonQuery(
+            connection,
+            """
+            INSERT INTO realtime_roi_evidence(
+                experiment_run_id, revision_id, source_block_number,
+                acquired_at_utc, processed_at_utc, value_source, quality_weight,
+                reference_epoch, reference_lock_kind, source_start_sample_index,
+                source_end_sample_index, model_relative_value)
+            VALUES(
+                $experiment_run_id, $revision_id, $source_block_number,
+                $acquired_at_utc, $processed_at_utc, $value_source, $quality_weight,
+                $reference_epoch, $reference_lock_kind, $source_start_sample_index,
+                $source_end_sample_index, $model_relative_value)
+            ON CONFLICT(experiment_run_id, revision_id, source_block_number) DO UPDATE SET
+                acquired_at_utc = excluded.acquired_at_utc,
+                processed_at_utc = excluded.processed_at_utc,
+                value_source = excluded.value_source,
+                quality_weight = excluded.quality_weight,
+                reference_epoch = excluded.reference_epoch,
+                reference_lock_kind = excluded.reference_lock_kind,
+                source_start_sample_index = excluded.source_start_sample_index,
+                source_end_sample_index = excluded.source_end_sample_index,
+                model_relative_value = excluded.model_relative_value;
+            """,
+            ("$experiment_run_id", evidence.ExperimentRunId.ToString("D")),
+            ("$revision_id", evidence.RevisionId),
+            ("$source_block_number", evidence.SourceBlockNumber),
+            ("$acquired_at_utc", Format(evidence.AcquiredAt)),
+            ("$processed_at_utc", Format(evidence.ProcessedAt)),
+            ("$value_source", evidence.ValueSource),
+            ("$quality_weight", evidence.QualityWeight),
+            ("$reference_epoch", evidence.ReferenceEpoch),
+            ("$reference_lock_kind", evidence.ReferenceLockKind),
+            ("$source_start_sample_index", evidence.SourceStartSampleIndex),
+            ("$source_end_sample_index", evidence.SourceEndSampleIndex),
+            ("$model_relative_value", evidence.ModelRelativeValue));
+    }
+
+    public IReadOnlyList<RealtimeRoiEvidenceCatalogRecord> ListRealtimeRoiEvidence(
+        Guid experimentRunId,
+        string revisionId)
+    {
+        if (experimentRunId == Guid.Empty)
+        {
+            throw new ArgumentException("Experiment run id is required.", nameof(experimentRunId));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(revisionId);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT experiment_run_id, revision_id, source_block_number,
+                   acquired_at_utc, processed_at_utc, value_source, quality_weight,
+                   reference_epoch, reference_lock_kind, source_start_sample_index,
+                   source_end_sample_index, model_relative_value
+            FROM realtime_roi_evidence
+            WHERE experiment_run_id = $experiment_run_id
+              AND revision_id = $revision_id
+            ORDER BY acquired_at_utc, source_block_number;
+            """;
+        command.Parameters.AddWithValue("$experiment_run_id", experimentRunId.ToString("D"));
+        command.Parameters.AddWithValue("$revision_id", revisionId.Trim());
+        using var reader = command.ExecuteReader();
+        var records = new List<RealtimeRoiEvidenceCatalogRecord>();
+        while (reader.Read())
+        {
+            records.Add(ReadRealtimeRoiEvidence(reader));
+        }
+
+        return records;
     }
 
     public ReconstructionRevisionCatalogRecord PublishReconstructionRevision(
@@ -1749,6 +1846,7 @@ public sealed class ExperimentCatalog
                  {
                      "experiment_exports",
                      "reference_epochs",
+                     "realtime_roi_evidence",
                      "reconstruction_lane_frames",
                      "reconstruction_revisions",
                      "derived_artifacts",
@@ -2349,6 +2447,27 @@ public sealed class ExperimentCatalog
         }
     }
 
+    private static void ValidateRealtimeRoiEvidence(RealtimeRoiEvidenceCatalogRecord evidence)
+    {
+        if (evidence.ExperimentRunId == Guid.Empty ||
+            string.IsNullOrWhiteSpace(evidence.RevisionId) ||
+            evidence.RevisionId.Length > 80 ||
+            evidence.RevisionId.Any(character => char.IsControl(character) || character is '/' or '\\') ||
+            evidence.SourceBlockNumber <= 0 ||
+            !RealtimeRoiEvidenceValueSource.IsKnown(evidence.ValueSource) ||
+            !double.IsFinite(evidence.QualityWeight) ||
+            evidence.QualityWeight < 0.0 ||
+            evidence.ReferenceEpoch <= 0 ||
+            string.IsNullOrWhiteSpace(evidence.ReferenceLockKind) ||
+            evidence.SourceStartSampleIndex < 0 ||
+            evidence.SourceEndSampleIndex <= evidence.SourceStartSampleIndex ||
+            !double.IsFinite(evidence.ModelRelativeValue) ||
+            Math.Abs(evidence.ModelRelativeValue - 1.0) > 1.0e-12)
+        {
+            throw new ArgumentException("Realtime ROI evidence state is invalid.", nameof(evidence));
+        }
+    }
+
     private static bool IsConductivityDatasetPath(string? path) =>
         path?.EndsWith("/reconstruction/conductivity", StringComparison.Ordinal) == true;
 
@@ -2490,6 +2609,23 @@ public sealed class ExperimentCatalog
             reader.IsDBNull(16) ? null : reader.GetInt64(16),
             reader.IsDBNull(17) ? null : reader.GetInt64(17),
             reader.IsDBNull(18) ? null : reader.GetString(18));
+    }
+
+    private static RealtimeRoiEvidenceCatalogRecord ReadRealtimeRoiEvidence(SqliteDataReader reader)
+    {
+        return new RealtimeRoiEvidenceCatalogRecord(
+            Guid.Parse(reader.GetString(0)),
+            reader.GetString(1),
+            reader.GetInt32(2),
+            Parse(reader.GetString(3)),
+            Parse(reader.GetString(4)),
+            reader.GetString(5),
+            reader.GetDouble(6),
+            reader.GetInt32(7),
+            reader.GetString(8),
+            reader.GetInt64(9),
+            reader.GetInt64(10),
+            reader.GetDouble(11));
     }
 
     private static RawSegmentCatalogRecord ReadRawSegment(SqliteDataReader reader)

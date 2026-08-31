@@ -12,6 +12,7 @@ internal sealed record RealtimeRoiCallbacks(
     Action<string, string> PublishReadiness,
     Action RequestPreviewFlush,
     Action RaiseSaveCanExecute,
+    Action<RealtimeDemodulatedBlock, RealtimeRunState> PersistTrustedNeutralEvidence,
     Action<string> Diagnostic);
 
 internal sealed class RealtimeRoiController
@@ -255,6 +256,8 @@ internal sealed class RealtimeRoiController
         {
             return;
         }
+
+        callbacks.PersistTrustedNeutralEvidence(block, state);
 
         var neutral = new RealtimeReconstructionResult(
             block.BlockNumber,

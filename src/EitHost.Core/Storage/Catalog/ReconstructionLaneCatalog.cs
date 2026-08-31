@@ -36,6 +36,27 @@ public static class ReconstructionFrameOutcome
         ExcludedNoReference or ExcludedInvalid or ExcludedDiscontinuity;
 }
 
+public static class RealtimeRoiEvidenceValueSource
+{
+    public const string TrustedNeutral = "trusted_neutral";
+
+    public static bool IsKnown(string value) => value == TrustedNeutral;
+}
+
+public sealed record RealtimeRoiEvidenceCatalogRecord(
+    Guid ExperimentRunId,
+    string RevisionId,
+    int SourceBlockNumber,
+    DateTimeOffset AcquiredAt,
+    DateTimeOffset ProcessedAt,
+    string ValueSource,
+    double QualityWeight,
+    int ReferenceEpoch,
+    string ReferenceLockKind,
+    long SourceStartSampleIndex,
+    long SourceEndSampleIndex,
+    double ModelRelativeValue);
+
 public sealed record ReconstructionRevisionCatalogRecord(
     Guid ExperimentRunId,
     string Lane,

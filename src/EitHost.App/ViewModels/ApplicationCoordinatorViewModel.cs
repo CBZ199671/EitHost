@@ -432,6 +432,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
                 (setLabel, readiness) => realtimePreview.PublishQualityAxes(setLabel, roiReadiness: readiness),
                 realtimePreview.RequestFlush,
                 () => PostToUi(() => SaveRoiCurveCommand?.RaiseCanExecuteChanged()),
+                (block, state) => derivedPersistence.QueueTrustedNeutralEvidence(block, state),
                 AddRealtimeDiagnostic)));
         VisualizationWorkspace.AttachRoiInteractionController(new RoiInteractionController(
             VisualizationWorkspace,

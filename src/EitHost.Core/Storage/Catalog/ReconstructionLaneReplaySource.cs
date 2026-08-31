@@ -29,6 +29,7 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
     private readonly ReconstructionRevisionCatalogRecord revision;
     private readonly IReadOnlyList<ReconstructionLaneFrameCatalogRecord> laneFrames;
     private readonly IReadOnlyDictionary<int, ReconstructionLaneFrameCatalogRecord> framesByBlock;
+    private readonly IReadOnlyList<RealtimeRoiEvidenceCatalogRecord> trustedNeutralRoiEvidence;
     private readonly GlobalReconstructionMeshStore meshStore;
     private ImagingRunDetail? laneDetail;
 
@@ -57,6 +58,9 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
             .ThenBy(frame => frame.SourceBlockNumber)
             .ToArray();
         framesByBlock = laneFrames.ToDictionary(frame => frame.SourceBlockNumber);
+        trustedNeutralRoiEvidence = string.Equals(lane, ReconstructionLane.Live, StringComparison.Ordinal)
+            ? catalog.ListRealtimeRoiEvidence(experimentRunId, revisionId)
+            : [];
         if (laneFrames.Count != revision.DemodDenominator)
         {
             throw new InvalidDataException(
@@ -69,6 +73,9 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
     public string RevisionId => revision.RevisionId;
 
     public ReconstructionRevisionCatalogRecord Revision => revision;
+
+    public IReadOnlyList<RealtimeRoiEvidenceCatalogRecord> ListRealtimeRoiEvidence() =>
+        trustedNeutralRoiEvidence;
 
     public ImagingRunDetail? GetImagingRunDetail(Guid imagingRunId)
     {

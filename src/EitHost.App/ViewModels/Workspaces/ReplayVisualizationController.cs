@@ -29,6 +29,7 @@ internal sealed class ReplayVisualizationController : IDisposable
     private ImagingRunDetail? replayRunDetail;
     private IImagingReplaySource? replaySource;
     private IReadOnlyList<ImagingFrameIndexEntry> replayFrames = [];
+    private IReadOnlyList<RealtimeRoiEvidenceCatalogRecord> replayTrustedNeutralEvidence = [];
     private IReadOnlyDictionary<int, string> replayReferenceLockKinds = new Dictionary<int, string>();
     private IReadOnlyDictionary<int, ImagingReferenceEpochRecord> replayReferenceEpochs = new Dictionary<int, ImagingReferenceEpochRecord>();
     private int replayLoadVersion;
@@ -162,9 +163,11 @@ internal sealed class ReplayVisualizationController : IDisposable
 
     private void QueueRoiRebuild(bool includeCurve)
     {
-        var requestedFrameNumber = workspace.ReplayFrameIndex + 1;
+        var requestedBlockNumber = replayFrames.Count == 0
+            ? -1
+            : replayFrames[Math.Clamp(workspace.ReplayFrameIndex, 0, replayFrames.Count - 1)].BlockNumber;
         var analysis = replayFixedRoiAnalyses.FirstOrDefault(candidate =>
-                candidate.Frames.Any(frame => frame.FrameIndex == requestedFrameNumber))
+                candidate.Frames.Any(frame => frame.BlockNumber == requestedBlockNumber))
             ?? replayFixedRoiAnalysis;
         var curveVersion = includeCurve
             ? Interlocked.Increment(ref replayCurveRebuildVersion)
@@ -178,10 +181,11 @@ internal sealed class ReplayVisualizationController : IDisposable
             workspace.SelectedFixedRoiCell,
             workspace.FixedRoiAngularRingNumber,
             workspace.FixedRoiTemporalMapMode,
-            requestedFrameNumber,
+            requestedBlockNumber,
             replayRunDetail?.SetLabel ?? "replay",
             replayFixedRoiSamples.ToArray(),
-            analysis);
+            analysis,
+            replayTrustedNeutralEvidence.Select(evidence => evidence.SourceBlockNumber).ToHashSet());
         roiRebuildWorker.TryPost(request);
     }
 
@@ -197,6 +201,14 @@ internal sealed class ReplayVisualizationController : IDisposable
                 request.SetLabel,
                 request.Samples,
                 request.Roi);
+            for (var index = 0; index < series.Count; index++)
+            {
+                if (request.TrustedNeutralBlocks.Contains(series[index].BlockNumber))
+                {
+                    series[index] = series[index] with { ValueSource = RoiValueSource.TrustedNeutral };
+                }
+            }
+
             chart = RoiVisualizationEngine.BuildRoiCurveChart(series);
         }
 
@@ -204,7 +216,7 @@ internal sealed class ReplayVisualizationController : IDisposable
         if (request.Analysis is { Frames.Count: > 0 } analysis)
         {
             var analysisFrameIndex = Enumerable.Range(0, analysis.Frames.Count)
-                .MinBy(index => Math.Abs(analysis.Frames[index].FrameIndex - request.RequestedFrameNumber));
+                .MinBy(index => Math.Abs(analysis.Frames[index].BlockNumber - request.RequestedBlockNumber));
             visual = FixedRoiTemporalVisualization.Build(
                 request.Grid,
                 analysis,
@@ -496,6 +508,9 @@ internal sealed class ReplayVisualizationController : IDisposable
             replaySource = runSource;
             replayRunDetail = detail;
             replayFrames = frames;
+            replayTrustedNeutralEvidence = runSource is ReconstructionLaneReplaySource loadedLaneSource
+                ? loadedLaneSource.ListRealtimeRoiEvidence()
+                : [];
             workspace.SetReplayFrameCount(frames.Count);
             replayReferenceLockKinds = referenceEpochs.ToDictionary(
                 epoch => epoch.ReferenceEpoch,
@@ -511,7 +526,9 @@ internal sealed class ReplayVisualizationController : IDisposable
             workspace.ReplayRoiAxisStart = string.Empty;
             workspace.ReplayRoiAxisMiddle = string.Empty;
             workspace.ReplayRoiAxisEnd = string.Empty;
-            workspace.ReplayRoiSummary = "ROI：已加载记录，点击“计算 ROI”生成曲线。";
+            workspace.ReplayRoiSummary = replayTrustedNeutralEvidence.Count == 0
+                ? "ROI：已加载记录，点击“计算 ROI”生成曲线。"
+                : $"ROI：已加载记录 · 可信基准证据 {replayTrustedNeutralEvidence.Count} 点，点击“计算 ROI”生成完整曲线。";
             ReplayDataChanged?.Invoke();
             TogglePlaybackCommand.RaiseCanExecuteChanged();
             CalculateRoiCommand.RaiseCanExecuteChanged();
@@ -519,8 +536,11 @@ internal sealed class ReplayVisualizationController : IDisposable
             var laneSummary = runSource is ReconstructionLaneReplaySource loadedLane
                 ? $" · {DescribeLane(loadedLane.Lane)} · revision {loadedLane.RevisionId}"
                 : string.Empty;
+            var neutralEvidenceSummary = replayTrustedNeutralEvidence.Count == 0
+                ? string.Empty
+                : $" · 可信基准证据 {replayTrustedNeutralEvidence.Count}";
             workspace.ReplayRunSummary =
-                $"{detail.SetLabel} · {detail.StartedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss} ~ {ended} · {detail.ReconstructionRoute}{laneSummary} · 帧 {frames.Count}";
+                $"{detail.SetLabel} · {detail.StartedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss} ~ {ended} · {detail.ReconstructionRoute}{laneSummary} · 重构帧 {frames.Count}{neutralEvidenceSummary}";
             if (frames.Count == 0)
             {
                 workspace.ReplayFrameSummary = "该记录没有已保存解调块。";
@@ -897,6 +917,9 @@ internal sealed class ReplayVisualizationController : IDisposable
         }
 
         var calculationVersion = Interlocked.Increment(ref replayRoiCalculationVersion);
+        var replayFrameBlocks = frames.Select(frame => frame.BlockNumber).ToHashSet();
+        var roiSampleCount = frames.Length + replayTrustedNeutralEvidence.Count(evidence =>
+            !replayFrameBlocks.Contains(evidence.SourceBlockNumber));
         using var cancellation = new CancellationTokenSource();
         var progress = new Progress<ReplayRoiProgress>(update =>
         {
@@ -911,7 +934,7 @@ internal sealed class ReplayVisualizationController : IDisposable
             StatusMessage = workspace.ReplayRoiSummary;
             ReplayDataChanged?.Invoke();
         });
-        workspace.ReplayRoiSummary = $"ROI：正在读取 0/{frames.Length} 帧…";
+        workspace.ReplayRoiSummary = $"ROI：正在读取 0/{roiSampleCount} 点…";
         StatusMessage = workspace.ReplayRoiSummary;
         ReplayDataChanged?.Invoke();
         try
@@ -992,8 +1015,20 @@ internal sealed class ReplayVisualizationController : IDisposable
         IProgress<ReplayRoiProgress>? progress,
         CancellationToken cancellationToken)
     {
-        var points = new List<RoiCurvePoint>(frames.Count);
-        var fixedSamples = new List<FixedRoiTemporalSample>(frames.Count);
+        var frameBlocks = frames.Select(frame => frame.BlockNumber).ToHashSet();
+        var trustedNeutralEvidence = runSource is ReconstructionLaneReplaySource evidenceSource
+            ? evidenceSource.ListRealtimeRoiEvidence()
+                .Where(evidence => !frameBlocks.Contains(evidence.SourceBlockNumber))
+                .ToArray()
+            : [];
+        var timeline = frames
+            .Select(frame => new ReplayRoiTimelineEntry(frame, null))
+            .Concat(trustedNeutralEvidence.Select(evidence => new ReplayRoiTimelineEntry(null, evidence)))
+            .OrderBy(item => item.CapturedAt)
+            .ThenBy(item => item.BlockNumber)
+            .ToArray();
+        var points = new List<RoiCurvePoint>(timeline.Length);
+        var fixedSamples = new List<FixedRoiTemporalSample>(timeline.Length);
         var paddingFraction = VisualizationGeometry.ImagePaddingFraction;
         var fixedCellIndex = roi.FixedCell is null
             ? -1
@@ -1007,8 +1042,8 @@ internal sealed class ReplayVisualizationController : IDisposable
             var laneProgress = new CallbackProgress<ReconstructionLaneRoiReadProgress>(update =>
                 progress?.Report(new ReplayRoiProgress(
                     "读取",
-                    update.CompletedFrameCount,
-                    update.TotalFrameCount)));
+                    Math.Min(timeline.Length, trustedNeutralEvidence.Length + update.CompletedFrameCount),
+                    timeline.Length)));
             laneFrames = laneSource.ReadRoiFrames(
                 detail.ImagingRunId,
                 detail,
@@ -1017,40 +1052,81 @@ internal sealed class ReplayVisualizationController : IDisposable
                 cancellationToken).FramesByBlock;
         }
 
-        for (var index = 0; index < frames.Count; index++)
+        var neutralConductivity = Array.Empty<double>();
+        if (trustedNeutralEvidence.Length > 0)
+        {
+            var parameterEntity = ReconstructionParameterEntity.Normalize(detail.ReconstructionParameterEntity);
+            neutralConductivity = Enumerable.Repeat(
+                1.0,
+                parameterEntity == ReconstructionParameterEntity.Node
+                    ? detail.NodeCoords!.GetLength(0)
+                    : detail.CellConnectivity!.GetLength(0)).ToArray();
+        }
+        IReadOnlyList<RoiConductivityMeasurement>? neutralFixedMeasurements = null;
+
+        for (var index = 0; index < timeline.Length; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var entry = frames[index];
+            var timelineEntry = timeline[index];
+            var entry = timelineEntry.Frame;
+            var evidence = timelineEntry.TrustedNeutralEvidence;
             double[]? conductivity;
             int? referenceEpoch;
+            string referenceLockKind;
             DateTimeOffset capturedAt;
             double qualityWeight;
-            if (laneFrames is not null)
+            int blockNumber;
+            var valueSource = RoiValueSource.InverseReconstruction;
+            if (evidence is not null)
             {
-                if (!laneFrames.TryGetValue(entry.BlockNumber, out var laneFrame))
+                conductivity = neutralConductivity;
+                referenceEpoch = evidence.ReferenceEpoch;
+                referenceLockKind = evidence.ReferenceLockKind;
+                capturedAt = evidence.AcquiredAt;
+                qualityWeight = evidence.QualityWeight;
+                blockNumber = evidence.SourceBlockNumber;
+                valueSource = RoiValueSource.TrustedNeutral;
+            }
+            else if (laneFrames is not null)
+            {
+                if (entry is null || !laneFrames.TryGetValue(entry.BlockNumber, out var laneFrame))
                 {
-                    ReportReplayRoiProgress(progress, "计算", index + 1, frames.Count);
+                    ReportReplayRoiProgress(progress, "计算", index + 1, timeline.Length);
                     continue;
                 }
 
                 conductivity = laneFrame.Conductivity;
                 referenceEpoch = laneFrame.ReferenceEpoch;
+                referenceLockKind = RoiVisualizationEngine.ResolveReferenceLockKind(
+                    referenceEpoch,
+                    referenceLockKinds);
                 capturedAt = entry.CapturedAt;
                 qualityWeight = entry.QualityWeight;
+                blockNumber = entry.BlockNumber;
             }
             else
             {
+                if (entry is null)
+                {
+                    ReportReplayRoiProgress(progress, "计算", index + 1, timeline.Length);
+                    continue;
+                }
+
                 var frame = runSource.GetFrame(detail.ImagingRunId, entry.BlockNumber);
                 if (frame?.Conductivity is not { Length: > 0 } frameConductivity)
                 {
-                    ReportReplayRoiProgress(progress, "计算", index + 1, frames.Count);
+                    ReportReplayRoiProgress(progress, "计算", index + 1, timeline.Length);
                     continue;
                 }
 
                 conductivity = frameConductivity;
                 referenceEpoch = frame.ReferenceEpoch;
+                referenceLockKind = RoiVisualizationEngine.ResolveReferenceLockKind(
+                    referenceEpoch,
+                    referenceLockKinds);
                 capturedAt = frame.CapturedAt;
                 qualityWeight = frame.QualityWeight;
+                blockNumber = entry.BlockNumber;
             }
 
             if (conductivity is not { Length: > 0 })
@@ -1061,54 +1137,66 @@ internal sealed class ReplayVisualizationController : IDisposable
             RoiCurvePoint? point;
             if (fixedCellIndex >= 0)
             {
-                var measurements = RoiConductivityAnalyzer.MeasureAll(
-                    workspace.FixedRoiGrid,
-                    detail.NodeCoords!,
-                    detail.CellConnectivity!,
-                    conductivity,
-                    paddingFraction,
-                    detail.ReconstructionParameterEntity);
+                var measurements = evidence is not null && neutralFixedMeasurements is not null
+                    ? neutralFixedMeasurements
+                    : RoiConductivityAnalyzer.MeasureAll(
+                        workspace.FixedRoiGrid,
+                        detail.NodeCoords!,
+                        detail.CellConnectivity!,
+                        conductivity,
+                        paddingFraction,
+                        detail.ReconstructionParameterEntity);
+                if (evidence is not null)
+                {
+                    neutralFixedMeasurements ??= measurements;
+                }
+
                 fixedSamples.Add(FixedRoiTemporalSample.FromMeasurements(
                     index + 1,
-                    entry.BlockNumber,
+                    blockNumber,
                     capturedAt,
                     qualityWeight,
                     measurements,
                     referenceEpoch,
-                    RoiVisualizationEngine.ResolveReferenceLockKind(referenceEpoch, referenceLockKinds)));
+                    referenceLockKind));
                 point = RoiVisualizationEngine.CreateRoiCurvePointFromMeasurement(
                     detail.SetLabel,
                     index + 1,
-                    entry.BlockNumber,
+                    blockNumber,
                     capturedAt,
                     qualityWeight,
                     referenceEpoch,
-                    RoiVisualizationEngine.ResolveReferenceLockKind(referenceEpoch, referenceLockKinds),
+                    referenceLockKind,
                     measurements[fixedCellIndex],
-                    roi);
+                    roi,
+                    valueSource);
             }
             else
             {
                 point = RoiVisualizationEngine.CreateRoiCurvePoint(
                     detail.SetLabel,
                     index + 1,
-                    entry.BlockNumber,
+                    blockNumber,
                     capturedAt,
                     qualityWeight,
                     referenceEpoch,
-                    RoiVisualizationEngine.ResolveReferenceLockKind(referenceEpoch, referenceLockKinds),
+                    referenceLockKind,
                     conductivity,
                     detail.NodeCoords!,
                     detail.CellConnectivity!,
                     roi,
                     detail.ReconstructionParameterEntity);
+                if (point is not null && evidence is not null)
+                {
+                    point = point with { ValueSource = valueSource };
+                }
             }
             if (point is not null)
             {
                 points.Add(point);
             }
 
-            ReportReplayRoiProgress(progress, "计算", index + 1, frames.Count);
+            ReportReplayRoiProgress(progress, "计算", index + 1, timeline.Length);
         }
 
         return new ReplayRoiCalculationResult(points, fixedSamples);
@@ -1116,9 +1204,11 @@ internal sealed class ReplayVisualizationController : IDisposable
 
     internal void RebuildTemporalView()
     {
-        var requestedFrameNumber = workspace.ReplayFrameIndex + 1;
+        var requestedBlockNumber = replayFrames.Count == 0
+            ? -1
+            : replayFrames[Math.Clamp(workspace.ReplayFrameIndex, 0, replayFrames.Count - 1)].BlockNumber;
         var analysis = replayFixedRoiAnalyses.FirstOrDefault(candidate =>
-                candidate.Frames.Any(frame => frame.FrameIndex == requestedFrameNumber))
+                candidate.Frames.Any(frame => frame.BlockNumber == requestedBlockNumber))
             ?? replayFixedRoiAnalysis;
         if (analysis is null || analysis.Frames.Count == 0)
         {
@@ -1127,7 +1217,7 @@ internal sealed class ReplayVisualizationController : IDisposable
         }
 
         var analysisFrameIndex = Enumerable.Range(0, analysis.Frames.Count)
-            .MinBy(index => Math.Abs(analysis.Frames[index].FrameIndex - requestedFrameNumber));
+            .MinBy(index => Math.Abs(analysis.Frames[index].BlockNumber - requestedBlockNumber));
         workspace.ReplayFixedRoiTemporal = FixedRoiTemporalVisualization.Build(
             workspace.FixedRoiGrid,
             analysis,
@@ -1222,6 +1312,7 @@ internal sealed class ReplayVisualizationController : IDisposable
         workspace.SetActiveReplayLane(null, null);
         replayRunDetail = null;
         replayFrames = [];
+        replayTrustedNeutralEvidence = [];
         workspace.SetReplayFrameCount(0);
         replayReferenceLockKinds = new Dictionary<int, string>();
         replayReferenceEpochs = new Dictionary<int, ImagingReferenceEpochRecord>();
@@ -1367,6 +1458,19 @@ internal sealed class ReplayVisualizationController : IDisposable
 
     private sealed record ReplayFrameRequest(int Index, int Version);
 
+    private sealed record ReplayRoiTimelineEntry(
+        ImagingFrameIndexEntry? Frame,
+        RealtimeRoiEvidenceCatalogRecord? TrustedNeutralEvidence)
+    {
+        internal int BlockNumber => Frame?.BlockNumber
+            ?? TrustedNeutralEvidence?.SourceBlockNumber
+            ?? throw new InvalidOperationException("Replay ROI timeline entry has no source block.");
+
+        internal DateTimeOffset CapturedAt => Frame?.CapturedAt
+            ?? TrustedNeutralEvidence?.AcquiredAt
+            ?? throw new InvalidOperationException("Replay ROI timeline entry has no timestamp.");
+    }
+
     private sealed record ReplayRoiProgress(
         string Phase,
         int CompletedFrameCount,
@@ -1386,10 +1490,11 @@ internal sealed class ReplayVisualizationController : IDisposable
         FixedRoiCell SelectedCell,
         int RingNumber,
         string MapMode,
-        int RequestedFrameNumber,
+        int RequestedBlockNumber,
         string SetLabel,
         IReadOnlyList<FixedRoiTemporalSample> Samples,
-        FixedRoiTemporalAnalysis? Analysis);
+        FixedRoiTemporalAnalysis? Analysis,
+        IReadOnlySet<int> TrustedNeutralBlocks);
 
     private sealed record SegmentedImagingRun(string StorePath, ImagingRunSummary Summary);
 }
