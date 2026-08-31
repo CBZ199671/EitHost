@@ -182,9 +182,7 @@ public class ReferenceReconstructionCoordinator
     public int ManualReferenceLockRequested;
 
     public EcdCwrReferenceStationarityMonitor ReferenceStationarity { get; } = new(
-        new EcdCwrReferenceStationarityOptions(
-            MaximumAdaptiveShapeResidualPerMinute: 1.0e-3,
-            AllowCommonScaleDrift: true));
+        RealtimeReferenceTolerancePolicy.CreateStationarityOptions());
 
     public EcdCwrReferenceStationarityResult? LatestReferenceStationarity { get; set; }
 

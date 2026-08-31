@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using EitHost.Core.Application.Realtime;
 using EitHost.Core.Demodulation;
 using EitHost.Core.Diagnostics.ElectrodeContact;
 using EitHost.Core.Hardware.Dds;
@@ -121,6 +122,7 @@ internal sealed class RealtimeContactCalibrationController
             state.ContactMonitor = config.EnableOutlierDetection
                 ? new ElectrodeContactMonitor(
                     baseline,
+                    RealtimeReferenceTolerancePolicy.CreateContactMonitorOptions(),
                     healthCalibration: provisionalCalibration)
                 : null;
             state.ContactCalibration = provisionalCalibration;
@@ -139,7 +141,7 @@ internal sealed class RealtimeContactCalibrationController
             callbacks.PublishReferenceInvalidated(config.SetLabel, false);
             callbacks.CalibrationStateChanged();
             callbacks.Diagnostic(
-                $"{config.SetLabel} contact qc_ref locked block={block.BlockNumber} robust_frames={robustReference.FrameCount} detect={(config.EnableOutlierDetection ? "on" : "off")} comp={(config.EnableOutlierCompensation ? "on" : "off")}");
+                $"{config.SetLabel} contact qc_ref locked block={block.BlockNumber} robust_frames={robustReference.FrameCount} detect={(config.EnableOutlierDetection ? "on" : "off")} comp={(config.EnableOutlierCompensation ? "on" : "off")} reference_tolerance={RealtimeReferenceTolerancePolicy.ProfileVersion}");
             callbacks.PublishContactSummary(
                 config.SetLabel,
                 config.EnableOutlierDetection
