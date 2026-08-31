@@ -67,12 +67,14 @@ public static class LayeredPseudo3dInterpolator
             lower.Result.CellConnectivity,
             lower.Result.Conductivity,
             sourceNodes.GetLength(0),
+            lower.Result.ParameterEntity,
             out var lowerValues,
             out var valuesAreNodal);
         _ = Triangulate(
             upper.Result.CellConnectivity,
             upper.Result.Conductivity,
             sourceNodes.GetLength(0),
+            upper.Result.ParameterEntity,
             out var upperValues,
             out var upperValuesAreNodal);
         if (valuesAreNodal != upperValuesAreNodal || lowerValues.Length != upperValues.Length)
@@ -214,6 +216,7 @@ public static class LayeredPseudo3dInterpolator
         int[,] cells,
         IReadOnlyList<double> conductivity,
         int nodeCount,
+        string parameterEntity,
         out double[] values,
         out bool valuesAreNodal)
     {
@@ -227,7 +230,17 @@ public static class LayeredPseudo3dInterpolator
             }
         }
 
-        valuesAreNodal = conductivity.Count == nodeCount;
+        valuesAreNodal = string.Equals(
+            ReconstructionParameterEntity.Normalize(parameterEntity),
+            ReconstructionParameterEntity.Node,
+            StringComparison.Ordinal);
+        var expectedValueCount = valuesAreNodal ? nodeCount : cellCount;
+        if (conductivity.Count != expectedValueCount)
+        {
+            throw new InvalidDataException(
+                $"Pseudo-3D conductivity length does not match parameter_entity={parameterEntity}: " +
+                $"{conductivity.Count}/{expectedValueCount}.");
+        }
         if (verticesPerCell == 3)
         {
             if (!valuesAreNodal && conductivity.Count != cellCount)

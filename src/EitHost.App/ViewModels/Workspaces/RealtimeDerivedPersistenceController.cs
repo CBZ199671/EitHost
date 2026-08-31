@@ -170,6 +170,36 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         return liveEvidence;
     }
 
+    internal async Task<ReconstructionMeshReference> EnsureCanonicalMeshAsync(
+        RealtimeImagingRunConfig config,
+        RealtimeRunState state,
+        RealtimeReconstructionResult result,
+        DateTimeOffset observedAt)
+    {
+        var meshReference = await Task.Run(() => meshStore.Ensure(
+            config.ImagingRunId,
+            observedAt,
+            result.NodeCoords,
+            result.CellConnectivity,
+            result.Conductivity.Length,
+            result.GetMeshIndexMetadata())).ConfigureAwait(false);
+        if (state.CanonicalMeshFingerprint is null)
+        {
+            state.CanonicalMeshFingerprint = meshReference.Fingerprint;
+        }
+        else if (!string.Equals(
+                     state.CanonicalMeshFingerprint,
+                     meshReference.Fingerprint,
+                     StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Realtime reconstruction mesh changed within one run: " +
+                $"{state.CanonicalMeshFingerprint} -> {meshReference.Fingerprint}.");
+        }
+
+        return meshReference;
+    }
+
     private async Task PersistReconstructionResultCoreAsync(
         RealtimeImagingRunConfig config,
         RealtimeRunState state,
@@ -196,12 +226,11 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         try
         {
             _ = dataLayout.EnsureDerivedDirectory(config.ImagingRunId, state.ExperimentStartedAt);
-            var meshReference = await Task.Run(() => meshStore.Ensure(
-                config.ImagingRunId,
-                processedAt,
-                result.NodeCoords,
-                result.CellConnectivity,
-                result.Conductivity.Length)).ConfigureAwait(false);
+            var meshReference = await EnsureCanonicalMeshAsync(
+                config,
+                state,
+                result,
+                processedAt).ConfigureAwait(false);
             if (!string.Equals(state.CanonicalMeshFingerprint, meshReference.Fingerprint, StringComparison.Ordinal))
             {
                 throw new InvalidDataException(
@@ -261,7 +290,11 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
                     DynamicKalmanSolveMilliseconds: result.DynamicKalmanSolveMilliseconds,
                     ReconstructionBackendElapsedMilliseconds: result.BackendElapsed.TotalMilliseconds,
                     MeshFingerprint: meshReference.Fingerprint,
-                    MeshArtifactPath: meshReference.ArtifactPath))).ConfigureAwait(false);
+                    MeshArtifactPath: meshReference.ArtifactPath,
+                    MeshIndexSchema: result.MeshIndexSchema,
+                    ParameterEntity: result.ParameterEntity,
+                    LogicalMeshFingerprint: result.LogicalMeshFingerprint,
+                    OrderedIndexFingerprint: result.OrderedIndexFingerprint))).ConfigureAwait(false);
             catalog.RecordReconstructionOutcome(
                 processingRecord,
                 "ready",

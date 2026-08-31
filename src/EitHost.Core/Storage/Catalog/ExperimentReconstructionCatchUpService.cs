@@ -309,7 +309,8 @@ public sealed class ExperimentReconstructionCatchUpService
             processedAt,
             result.NodeCoords,
             result.CellConnectivity,
-            result.Conductivity.Length);
+            result.Conductivity.Length,
+            result.GetMeshIndexMetadata());
         var existingMeshArtifact = catalog.ListDerivedArtifacts(run.ExperimentRunId, -1)
             .FirstOrDefault(artifact => string.Equals(artifact.Kind, "mesh", StringComparison.Ordinal));
         if (existingMeshArtifact is not null)
@@ -344,7 +345,11 @@ public sealed class ExperimentReconstructionCatchUpService
                 measurementWeight208,
                 ReconstructionBackendElapsedMilliseconds: result.BackendElapsed.TotalMilliseconds,
                 MeshFingerprint: meshReference.Fingerprint,
-                MeshArtifactPath: meshReference.ArtifactPath));
+                MeshArtifactPath: meshReference.ArtifactPath,
+                MeshIndexSchema: result.MeshIndexSchema,
+                ParameterEntity: result.ParameterEntity,
+                LogicalMeshFingerprint: result.LogicalMeshFingerprint,
+                OrderedIndexFingerprint: result.OrderedIndexFingerprint));
 
         catalog.RegisterDerivedArtifact(new DerivedArtifactCatalogRecord(
             run.ExperimentRunId,

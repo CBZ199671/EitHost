@@ -703,7 +703,8 @@ public sealed class ExperimentOfflineCompleteService
             processedAt,
             result.NodeCoords,
             result.CellConnectivity,
-            result.Conductivity.Length);
+            result.Conductivity.Length,
+            result.GetMeshIndexMetadata());
         EnsureRevisionMeshIdentity(run.ExperimentRunId, revisionId, meshReference.Fingerprint);
         var outputPath = layout.GetOfflineDerivedBlockPath(
             run.RunDirectory,
@@ -739,7 +740,11 @@ public sealed class ExperimentOfflineCompleteService
             result.DynamicKalmanSolveMilliseconds,
             result.BackendElapsed.TotalMilliseconds,
             meshReference.Fingerprint,
-            meshReference.ArtifactPath));
+            meshReference.ArtifactPath,
+            result.MeshIndexSchema,
+            result.ParameterEntity,
+            result.LogicalMeshFingerprint,
+            result.OrderedIndexFingerprint));
         catalog.RecordReconstructionLaneFrame(new ReconstructionLaneFrameCatalogRecord(
             run.ExperimentRunId,
             ReconstructionLane.OfflineComplete,

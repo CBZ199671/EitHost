@@ -592,6 +592,12 @@ internal static class VisualizationRenderer
             double? persistedScaleRange = null)
         {
             ApplyPendingColorScaleReset();
+            var meshIndexMetadata = result.GetMeshIndexMetadata();
+            meshIndexMetadata.ValidateForResult(
+                result.NodeCoords,
+                result.CellConnectivity,
+                result.Conductivity.Length,
+                requireCanonical: false);
             var edge = VisualizationGeometry.ClampImagePixelSize(imagePixelSize);
             EnsureRaster(result.NodeCoords, result.CellConnectivity, edge);
             var pixels = RentFrameBuffer(edge);
@@ -608,7 +614,12 @@ internal static class VisualizationRenderer
 
                 var invert = NormalizeRealtimeImagePolarity(imagePolarity) == "inverted";
                 var gain = Math.Clamp(imageGain, 0.1, 5.0);
-                var nodeValues = ProjectCellValuesToNodes(result.Conductivity);
+                var nodeValues = string.Equals(
+                    meshIndexMetadata.ParameterEntity,
+                    ReconstructionParameterEntity.Node,
+                    StringComparison.Ordinal)
+                    ? result.Conductivity
+                    : ProjectCellValuesToNodes(result.Conductivity);
                 var rasterCells = cellByPixel;
                 var weight0ByPixel = barycentricWeight0ByPixel;
                 var weight1ByPixel = barycentricWeight1ByPixel;

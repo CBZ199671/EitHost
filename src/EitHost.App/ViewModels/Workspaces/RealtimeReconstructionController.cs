@@ -2,7 +2,6 @@ using System.IO;
 using EitHost.Core.Demodulation;
 using EitHost.Core.Diagnostics.ElectrodeContact;
 using EitHost.Core.Reconstruction;
-using EitHost.Core.Storage.Hdf5;
 
 namespace EitHost.App.ViewModels.Workspaces;
 
@@ -253,18 +252,13 @@ internal sealed class RealtimeReconstructionController
             return;
         }
 
-        var meshFingerprint = ReconstructionMeshFingerprint.Compute(
-            result.NodeCoords,
-            result.CellConnectivity);
-        if (state.CanonicalMeshFingerprint is null)
-        {
-            state.CanonicalMeshFingerprint = meshFingerprint;
-        }
-        else if (!string.Equals(state.CanonicalMeshFingerprint, meshFingerprint, StringComparison.Ordinal))
-        {
-            throw new InvalidDataException(
-                $"Realtime reconstruction mesh changed within one run: {state.CanonicalMeshFingerprint} -> {meshFingerprint}.");
-        }
+        // Bind and verify the one DataRoot-wide canonical mesh before this result can
+        // affect state, rendering, ROI, replay evidence, or persistence.
+        _ = await persistence.EnsureCanonicalMeshAsync(
+            config,
+            state,
+            result,
+            acquiredAt).ConfigureAwait(false);
 
         UpdateContactSubspaceEvidence(state, result);
         state.RoiGeometry = new RealtimeRoiGeometry(result.NodeCoords, result.CellConnectivity);

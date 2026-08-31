@@ -73,7 +73,8 @@ internal sealed class RealtimeRoiController
                 result.NodeCoords,
                 result.CellConnectivity,
                 result.Conductivity,
-                VisualizationGeometry.ImagePaddingFraction);
+                VisualizationGeometry.ImagePaddingFraction,
+                result.ParameterEntity);
             var fixedCellIndex = RoiVisualizationEngine.GetFixedRoiCellIndex(workspace.FixedRoiGrid, fixedCell.Id);
             fixedSample = FixedRoiTemporalSample.FromMeasurements(
                 0,
@@ -108,7 +109,8 @@ internal sealed class RealtimeRoiController
                 result.Conductivity,
                 result.NodeCoords,
                 result.CellConnectivity,
-                roi);
+                roi,
+                result.ParameterEntity);
             if (point is not null)
             {
                 point = point with { ValueSource = valueSource };

@@ -1,3 +1,5 @@
+using EitHost.Core.Reconstruction;
+
 namespace EitHost.Core.Analysis;
 
 public enum RoiSelectionShape
@@ -56,7 +58,8 @@ public static class RoiConductivityAnalyzer
         double[,] nodeCoords,
         int[,] cellConnectivity,
         IReadOnlyList<double> conductivity,
-        double paddingFraction = 0.05)
+        double paddingFraction = 0.05,
+        string? parameterEntity = null)
     {
         ArgumentNullException.ThrowIfNull(grid);
         ArgumentNullException.ThrowIfNull(nodeCoords);
@@ -90,10 +93,19 @@ public static class RoiConductivityAnalyzer
         var totalWeights = new double[grid.Cells.Count];
         var minimums = Enumerable.Repeat(double.PositiveInfinity, grid.Cells.Count).ToArray();
         var maximums = Enumerable.Repeat(double.NegativeInfinity, grid.Cells.Count).ToArray();
-        var meshCellCount = Math.Min(cellConnectivity.GetLength(0), conductivity.Count);
+        var meshCellCount = GetMeshCellCount(
+            nodeCoords,
+            cellConnectivity,
+            conductivity,
+            parameterEntity);
         for (var meshCell = 0; meshCell < meshCellCount; meshCell++)
         {
-            var value = conductivity[meshCell];
+            var value = GetCellValue(
+                meshCell,
+                nodeCoords,
+                cellConnectivity,
+                conductivity,
+                parameterEntity);
             if (!double.IsFinite(value))
             {
                 continue;
@@ -149,7 +161,8 @@ public static class RoiConductivityAnalyzer
         double[,] nodeCoords,
         int[,] cellConnectivity,
         IReadOnlyList<double> conductivity,
-        double paddingFraction = 0.05)
+        double paddingFraction = 0.05,
+        string? parameterEntity = null)
     {
         ArgumentNullException.ThrowIfNull(roi);
         var normalizedRoi = roi.Normalize();
@@ -158,7 +171,8 @@ public static class RoiConductivityAnalyzer
             nodeCoords,
             cellConnectivity,
             conductivity,
-            paddingFraction);
+            paddingFraction,
+            parameterEntity);
     }
 
     public static RoiConductivityMeasurement Measure(
@@ -166,7 +180,8 @@ public static class RoiConductivityAnalyzer
         double[,] nodeCoords,
         int[,] cellConnectivity,
         IReadOnlyList<double> conductivity,
-        double paddingFraction = 0.05)
+        double paddingFraction = 0.05,
+        string? parameterEntity = null)
     {
         ArgumentNullException.ThrowIfNull(roi);
         var normalizedPadding = NormalizePadding(paddingFraction);
@@ -175,7 +190,8 @@ public static class RoiConductivityAnalyzer
             nodeCoords,
             cellConnectivity,
             conductivity,
-            normalizedPadding);
+            normalizedPadding,
+            parameterEntity);
     }
 
     private static RoiConductivityMeasurement MeasureCore(
@@ -183,7 +199,8 @@ public static class RoiConductivityAnalyzer
         double[,] nodeCoords,
         int[,] cellConnectivity,
         IReadOnlyList<double> conductivity,
-        double paddingFraction)
+        double paddingFraction,
+        string? parameterEntity)
     {
         ArgumentNullException.ThrowIfNull(contains);
         ArgumentNullException.ThrowIfNull(nodeCoords);
@@ -211,11 +228,20 @@ public static class RoiConductivityAnalyzer
         var totalWeight = 0.0;
         var min = double.PositiveInfinity;
         var max = double.NegativeInfinity;
-        var cellCount = Math.Min(cellConnectivity.GetLength(0), conductivity.Count);
+        var cellCount = GetMeshCellCount(
+            nodeCoords,
+            cellConnectivity,
+            conductivity,
+            parameterEntity);
 
         for (var cell = 0; cell < cellCount; cell++)
         {
-            var value = conductivity[cell];
+            var value = GetCellValue(
+                cell,
+                nodeCoords,
+                cellConnectivity,
+                conductivity,
+                parameterEntity);
             if (!double.IsFinite(value))
             {
                 continue;
@@ -258,6 +284,64 @@ public static class RoiConductivityAnalyzer
             totalWeight,
             min,
             max);
+    }
+
+    private static int GetMeshCellCount(
+        double[,] nodeCoords,
+        int[,] cellConnectivity,
+        IReadOnlyList<double> conductivity,
+        string? parameterEntity)
+    {
+        if (parameterEntity is null)
+        {
+            return Math.Min(cellConnectivity.GetLength(0), conductivity.Count);
+        }
+
+        var normalized = ReconstructionParameterEntity.Normalize(parameterEntity);
+        var expected = normalized == ReconstructionParameterEntity.Node
+            ? nodeCoords.GetLength(0)
+            : cellConnectivity.GetLength(0);
+        if (conductivity.Count != expected)
+        {
+            throw new InvalidDataException(
+                $"ROI conductivity length does not match parameter_entity={normalized}: " +
+                $"{conductivity.Count}/{expected}.");
+        }
+
+        return cellConnectivity.GetLength(0);
+    }
+
+    private static double GetCellValue(
+        int cell,
+        double[,] nodeCoords,
+        int[,] cellConnectivity,
+        IReadOnlyList<double> conductivity,
+        string? parameterEntity)
+    {
+        if (parameterEntity is null)
+        {
+            return conductivity[cell];
+        }
+
+        var normalized = ReconstructionParameterEntity.Normalize(parameterEntity);
+        if (normalized == ReconstructionParameterEntity.Cell)
+        {
+            return conductivity[cell];
+        }
+
+        var sum = 0.0;
+        for (var vertex = 0; vertex < cellConnectivity.GetLength(1); vertex++)
+        {
+            var node = cellConnectivity[cell, vertex];
+            if (node < 0 || node >= nodeCoords.GetLength(0))
+            {
+                throw new InvalidDataException("ROI mesh contains an out-of-range node index.");
+            }
+
+            sum += conductivity[node];
+        }
+
+        return sum / cellConnectivity.GetLength(1);
     }
 
     private static RoiConductivityMeasurement Empty()

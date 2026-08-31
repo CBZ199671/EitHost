@@ -181,7 +181,8 @@ internal static class RoiVisualizationEngine
         IReadOnlyList<double> conductivity,
         double[,] nodeCoords,
         int[,] cellConnectivity,
-        RoiSelectionSnapshot roi)
+        RoiSelectionSnapshot roi,
+        string? parameterEntity = null)
     {
         var paddingFraction = VisualizationGeometry.ImagePaddingFraction;
         var measurement = roi.FixedCell is { } fixedCell
@@ -190,13 +191,15 @@ internal static class RoiVisualizationEngine
                 nodeCoords,
                 cellConnectivity,
                 conductivity,
-                paddingFraction)
+                paddingFraction,
+                parameterEntity)
             : RoiConductivityAnalyzer.Measure(
                 roi.CustomDefinition ?? throw new InvalidOperationException("自定义 ROI 定义缺失。"),
                 nodeCoords,
                 cellConnectivity,
                 conductivity,
-                paddingFraction);
+                paddingFraction,
+                parameterEntity);
         return CreateRoiCurvePointFromMeasurement(
             setLabel,
             frameIndex,

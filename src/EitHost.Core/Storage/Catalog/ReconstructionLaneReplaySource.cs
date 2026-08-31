@@ -1,4 +1,5 @@
 using System.Text.Json;
+using EitHost.Core.Reconstruction;
 using EitHost.Core.Storage.Frames;
 using EitHost.Core.Storage.Hdf5;
 using PureHDF;
@@ -97,11 +98,18 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
             }
 
             var mesh = meshStore.Load(metadata.MeshArtifactPath, metadata.MeshFingerprint);
+            ValidateFrameMeshMetadata(metadata, mesh.MeshIndexMetadata);
             laneDetail = detail with
             {
                 NodeCoords = mesh.NodeCoords,
                 CellConnectivity = mesh.CellConnectivity,
-                MeshFingerprint = mesh.Fingerprint
+                MeshFingerprint = mesh.Fingerprint,
+                MeshIndexSchema = mesh.MeshIndexMetadata.MeshIndexSchema,
+                ReconstructionParameterEntity = mesh.MeshIndexMetadata.ParameterEntity,
+                LogicalMeshFingerprint = mesh.MeshIndexMetadata.LogicalMeshFingerprint,
+                OrderedIndexFingerprint = mesh.MeshIndexMetadata.OrderedIndexFingerprint,
+                MeshCoordinateDecimals = mesh.MeshIndexMetadata.CoordinateDecimals,
+                MeshCoordinateQuantizationStep = mesh.MeshIndexMetadata.CoordinateQuantizationStep
             };
             return laneDetail;
         }
@@ -204,6 +212,20 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
                 throw new InvalidDataException(
                     $"Reconstruction frame mesh does not match lane mesh for block {blockNumber}.");
             }
+
+            var laneMetadata = ReconstructionMeshIndexMetadata.FromPersisted(
+                detail.MeshIndexSchema,
+                detail.ReconstructionParameterEntity,
+                detail.LogicalMeshFingerprint,
+                detail.OrderedIndexFingerprint,
+                detail.MeshCoordinateDecimals,
+                detail.MeshCoordinateQuantizationStep);
+            ValidateFrameMeshMetadata(metadata, laneMetadata);
+            laneMetadata.ValidateForResult(
+                detail.NodeCoords!,
+                detail.CellConnectivity!,
+                conductivity.Length,
+                requireCanonical: !laneMetadata.UsesLegacyContract);
         }
 
         return frame with
@@ -242,6 +264,29 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
         return string.Equals(normalized, historicalGroupPath, StringComparison.Ordinal)
             ? DataRootLayout.GetDerivedDatasetPath(blockNumber, "/reconstruction/conductivity")
             : recordedPath;
+    }
+
+    private static void ValidateFrameMeshMetadata(
+        DerivedReconstructionMetadata metadata,
+        ReconstructionMeshIndexMetadata meshMetadata)
+    {
+        var hasFrameContract = !string.IsNullOrWhiteSpace(metadata.MeshIndexSchema) ||
+            !string.IsNullOrWhiteSpace(metadata.ParameterEntity) ||
+            !string.IsNullOrWhiteSpace(metadata.LogicalMeshFingerprint) ||
+            !string.IsNullOrWhiteSpace(metadata.OrderedIndexFingerprint);
+        if (!hasFrameContract)
+        {
+            return;
+        }
+
+        if (!string.Equals(metadata.MeshIndexSchema, meshMetadata.MeshIndexSchema, StringComparison.Ordinal) ||
+            !string.Equals(metadata.ParameterEntity, meshMetadata.ParameterEntity, StringComparison.Ordinal) ||
+            !string.Equals(metadata.LogicalMeshFingerprint, meshMetadata.LogicalMeshFingerprint, StringComparison.Ordinal) ||
+            !string.Equals(metadata.OrderedIndexFingerprint, meshMetadata.OrderedIndexFingerprint, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Reconstruction frame mesh-index contract does not match the fixed canonical inverse mesh.");
+        }
     }
 
     private static T? ReadOptional<T>(IH5Group file, string path) =>

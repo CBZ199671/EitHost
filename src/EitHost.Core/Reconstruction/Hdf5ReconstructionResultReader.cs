@@ -1,5 +1,6 @@
 using EitHost.Core.Storage.Hdf5;
 using PureHDF;
+using System.Text.Json;
 
 namespace EitHost.Core.Reconstruction;
 
@@ -18,6 +19,12 @@ public sealed class Hdf5ReconstructionResultReader
         var rawConductivity = TryReadDoubleVector(file, "/conductivity_raw");
         var nodeCoords = ReadDoubleMatrix(file.Dataset("/node_coords"));
         var cellConnectivity = ReadIntMatrix(file.Dataset("/cell_connectivity"));
+        var meshIndexMetadata = ReadMeshIndexMetadata(file);
+        meshIndexMetadata.ValidateForResult(
+            nodeCoords,
+            cellConnectivity,
+            conductivity.Length,
+            requireCanonical: false);
         var measured = TryReadDoubleVector(file, "/measured");
         var simulated = TryReadDoubleVector(file, "/simulated");
         var contactJacobian = TryReadContactJacobian(file);
@@ -71,7 +78,73 @@ public sealed class Hdf5ReconstructionResultReader
             ContactJacobian: contactJacobian.Values,
             ContactJacobianMeasurementSpace: contactJacobian.MeasurementSpace,
             ContactJacobianStatus: contactJacobian.Status,
-            ContactJacobianSource: contactJacobian.Source);
+            ContactJacobianSource: contactJacobian.Source,
+            MeshIndexMetadata: meshIndexMetadata);
+    }
+
+    private static ReconstructionMeshIndexMetadata ReadMeshIndexMetadata(IH5Group file)
+    {
+        if (!file.AttributeExists("metadata_json"))
+        {
+            return ReconstructionMeshIndexMetadata.LegacyCell;
+        }
+
+        string metadataJson;
+        try
+        {
+            metadataJson = file.Attribute("metadata_json").Read<string>();
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidDataException("PyEIDORS result metadata_json attribute is unreadable.", ex);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(metadataJson);
+            var root = document.RootElement;
+            var metadata = root.ValueKind == JsonValueKind.Object &&
+                root.TryGetProperty("metadata", out var nestedMetadata) &&
+                nestedMetadata.ValueKind == JsonValueKind.Object
+                    ? nestedMetadata
+                    : root;
+            var names = new[]
+            {
+                "mesh_index_schema",
+                "parameter_entity",
+                "logical_mesh_fingerprint",
+                "ordered_index_fingerprint",
+                "coordinate_decimals",
+                "coordinate_quantization_step"
+            };
+            var present = names.Count(name => metadata.TryGetProperty(name, out _));
+            if (present == 0)
+            {
+                return ReconstructionMeshIndexMetadata.LegacyCell;
+            }
+
+            if (present != names.Length)
+            {
+                throw new InvalidDataException(
+                    "PyEIDORS canonical mesh-index metadata is incomplete; all V2 fields are required.");
+            }
+
+            return ReconstructionMeshIndexMetadata.FromPersisted(
+                metadata.GetProperty("mesh_index_schema").GetString(),
+                metadata.GetProperty("parameter_entity").GetString() ?? string.Empty,
+                metadata.GetProperty("logical_mesh_fingerprint").GetString() ?? string.Empty,
+                metadata.GetProperty("ordered_index_fingerprint").GetString() ?? string.Empty,
+                metadata.GetProperty("coordinate_decimals").GetInt32(),
+                metadata.GetProperty("coordinate_quantization_step").GetDouble());
+        }
+        catch (InvalidDataException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException)
+        {
+            throw new InvalidDataException("PyEIDORS canonical mesh-index metadata is invalid.", ex);
+        }
     }
 
     private static ContactJacobianReadResult TryReadContactJacobian(IH5Group file)

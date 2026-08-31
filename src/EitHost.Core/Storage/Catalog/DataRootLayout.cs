@@ -125,6 +125,9 @@ public sealed class DataRootLayout
             $"mesh_{fingerprint[prefix.Length..].ToLowerInvariant()}.h5"));
     }
 
+    public string GlobalReconstructionMeshBindingPath => ResolveArtifactPath(
+        Path.Combine("meshes", "canonical_inverse_mesh_v2.json"));
+
     public string GetDerivedBlockPath(
         Guid experimentRunId,
         DateTimeOffset startedAt,

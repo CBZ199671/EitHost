@@ -655,7 +655,14 @@ internal sealed class ReplayVisualizationController : IDisposable
                     TimeSpan.Zero,
                     OutputPersisted: false,
                     ReconstructionScaleStatus: detail.ReconstructionScaleStatus,
-                    ReconstructionScaleProvenance: detail.ReconstructionScaleProvenance);
+                    ReconstructionScaleProvenance: detail.ReconstructionScaleProvenance,
+                    MeshIndexMetadata: ReconstructionMeshIndexMetadata.FromPersisted(
+                        detail.MeshIndexSchema,
+                        detail.ReconstructionParameterEntity,
+                        detail.LogicalMeshFingerprint,
+                        detail.OrderedIndexFingerprint,
+                        detail.MeshCoordinateDecimals,
+                        detail.MeshCoordinateQuantizationStep));
                 var polarity = presentation?.Polarity ?? ImagePolarity;
                 var gain = presentation?.Gain ?? ImageGain;
                 var imagePixelSize = VisualizationGeometry.ClampImagePixelSize(workspace.RoiImageCanvasSize);
@@ -694,7 +701,8 @@ internal sealed class ReplayVisualizationController : IDisposable
                     conductivity,
                     nodes,
                     cells,
-                    RoiVisualizationEngine.CaptureSelection(workspace));
+                    RoiVisualizationEngine.CaptureSelection(workspace),
+                    detail.ReconstructionParameterEntity);
                 roiText = roiPoint is null
                     ? "ROI 无单元"
                     : $"ROI 重构值 {roiPoint.MeanConductivity:F4} ({roiPoint.SelectedCellCount} 单元)";
@@ -929,7 +937,8 @@ internal sealed class ReplayVisualizationController : IDisposable
                     detail.NodeCoords!,
                     detail.CellConnectivity!,
                     conductivity,
-                    paddingFraction);
+                    paddingFraction,
+                    detail.ReconstructionParameterEntity);
                 fixedSamples.Add(FixedRoiTemporalSample.FromMeasurements(
                     index + 1,
                     frame.BlockNumber,
@@ -962,7 +971,8 @@ internal sealed class ReplayVisualizationController : IDisposable
                     conductivity,
                     detail.NodeCoords!,
                     detail.CellConnectivity!,
-                    roi);
+                    roi,
+                    detail.ReconstructionParameterEntity);
             }
             if (point is not null)
             {

@@ -1765,7 +1765,13 @@ public sealed record ImagingRunDetail(
     int? AdRangeCode = null,
     double? AdcFullSpanVolts = null,
     double? AdcLsbVolts = null,
-    string? MeshFingerprint = null);
+    string? MeshFingerprint = null,
+    string? MeshIndexSchema = null,
+    string? ReconstructionParameterEntity = null,
+    string? LogicalMeshFingerprint = null,
+    string? OrderedIndexFingerprint = null,
+    int? MeshCoordinateDecimals = null,
+    double? MeshCoordinateQuantizationStep = null);
 
 public sealed record ImagingFrameIndexEntry(
     int BlockNumber,

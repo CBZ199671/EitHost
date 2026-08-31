@@ -39,9 +39,29 @@ public sealed record RealtimeReconstructionResult(
     string? ContactJacobianStatus = null,
     string? ContactJacobianSource = null,
     string ReconstructionScaleStatus = ReconstructionScale.ModelRelative,
-    string ReconstructionScaleProvenance = ReconstructionScale.NormalizedModelProvenance)
+    string ReconstructionScaleProvenance = ReconstructionScale.NormalizedModelProvenance,
+    ReconstructionMeshIndexMetadata? MeshIndexMetadata = null)
 {
+    private ReconstructionMeshIndexMetadata EffectiveMeshIndexMetadata =>
+        MeshIndexMetadata ?? ReconstructionMeshIndexMetadata.LegacyCell;
+
     public bool Succeeded => string.IsNullOrWhiteSpace(ErrorMessage) && Conductivity.Length > 0;
+
+    public string MeshIndexSchema => EffectiveMeshIndexMetadata.MeshIndexSchema;
+
+    public string ParameterEntity => EffectiveMeshIndexMetadata.ParameterEntity;
+
+    public string? LogicalMeshFingerprint => EffectiveMeshIndexMetadata.LogicalMeshFingerprint;
+
+    public string? OrderedIndexFingerprint => EffectiveMeshIndexMetadata.OrderedIndexFingerprint;
+
+    public int? CoordinateDecimals => EffectiveMeshIndexMetadata.CoordinateDecimals;
+
+    public double? CoordinateQuantizationStep => EffectiveMeshIndexMetadata.CoordinateQuantizationStep;
+
+    public bool UsesLegacyMeshContract => EffectiveMeshIndexMetadata.UsesLegacyContract;
+
+    public ReconstructionMeshIndexMetadata GetMeshIndexMetadata() => EffectiveMeshIndexMetadata;
 
     public double MinConductivity => Conductivity.Length == 0 ? double.NaN : Conductivity.Min();
 

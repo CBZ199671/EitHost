@@ -262,7 +262,11 @@ public sealed class DerivedArtifactHdf5Writer
                     ["experiment_run_id"] = data.ExperimentRunId.ToString("D"),
                     ["kind"] = "mesh",
                     ["created_at_utc"] = data.CreatedAt.ToUniversalTime().ToString("O"),
-                    ["mesh_fingerprint"] = data.Fingerprint ?? string.Empty
+                    ["mesh_fingerprint"] = data.Fingerprint ?? string.Empty,
+                    ["mesh_index_schema"] = data.MeshIndexSchema ?? string.Empty,
+                    ["parameter_entity"] = data.ParameterEntity ?? string.Empty,
+                    ["logical_mesh_fingerprint"] = data.LogicalMeshFingerprint ?? string.Empty,
+                    ["ordered_index_fingerprint"] = data.OrderedIndexFingerprint ?? string.Empty
                 }
             }
         };
@@ -958,14 +962,22 @@ public sealed record DerivedReconstructionData(
     double? DynamicKalmanSolveMilliseconds = null,
     double? ReconstructionBackendElapsedMilliseconds = null,
     string? MeshFingerprint = null,
-    string? MeshArtifactPath = null);
+    string? MeshArtifactPath = null,
+    string? MeshIndexSchema = null,
+    string? ParameterEntity = null,
+    string? LogicalMeshFingerprint = null,
+    string? OrderedIndexFingerprint = null);
 
 public sealed record DerivedMeshData(
     Guid ExperimentRunId,
     DateTimeOffset CreatedAt,
     double[,] NodeCoords,
     int[,] CellConnectivity,
-    string? Fingerprint = null);
+    string? Fingerprint = null,
+    string? MeshIndexSchema = null,
+    string? ParameterEntity = null,
+    string? LogicalMeshFingerprint = null,
+    string? OrderedIndexFingerprint = null);
 
 public sealed record DerivedFrameDiagnosticsData(
     Guid ExperimentRunId,
@@ -1158,7 +1170,11 @@ public sealed record DerivedReconstructionMetadata(
     double? DynamicKalmanSolveMilliseconds,
     double? ReconstructionBackendElapsedMilliseconds,
     string? MeshFingerprint = null,
-    string? MeshArtifactPath = null)
+    string? MeshArtifactPath = null,
+    string? MeshIndexSchema = null,
+    string? ParameterEntity = null,
+    string? LogicalMeshFingerprint = null,
+    string? OrderedIndexFingerprint = null)
 {
     public static DerivedReconstructionMetadata From(DerivedReconstructionData data) => new(
         data.ProcessingMode,
@@ -1176,5 +1192,9 @@ public sealed record DerivedReconstructionMetadata(
         data.DynamicKalmanSolveMilliseconds,
         data.ReconstructionBackendElapsedMilliseconds,
         data.MeshFingerprint,
-        data.MeshArtifactPath);
+        data.MeshArtifactPath,
+        data.MeshIndexSchema,
+        data.ParameterEntity,
+        data.LogicalMeshFingerprint,
+        data.OrderedIndexFingerprint);
 }
