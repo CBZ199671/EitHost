@@ -184,6 +184,55 @@ internal static class AtomicFileCommitter
             delay);
     }
 
+    internal static void MoveDirectoryWithRetry(
+        string sourcePath,
+        string destinationPath,
+        Action<string, string>? move = null,
+        Action<TimeSpan>? delay = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
+        move ??= Directory.Move;
+        ExecuteWithTransientLeaseRetry(
+            sourcePath,
+            () =>
+            {
+                move(sourcePath, destinationPath);
+                return true;
+            },
+            delay,
+            exception => IsTransientDirectoryMoveFailure(
+                exception,
+                sourcePath,
+                destinationPath));
+    }
+
+    private static bool IsTransientDirectoryMoveFailure(
+        Exception exception,
+        string sourcePath,
+        string destinationPath)
+    {
+        if (!Directory.Exists(sourcePath) || Directory.Exists(destinationPath))
+        {
+            return false;
+        }
+
+        if (exception is UnauthorizedAccessException)
+        {
+            // Windows reports an open child handle during a directory rename as
+            // ERROR_ACCESS_DENIED rather than ERROR_SHARING_VIOLATION on some VFDs.
+            return OperatingSystem.IsWindows();
+        }
+
+        if (exception is not IOException)
+        {
+            return false;
+        }
+
+        var windowsError = exception.HResult & 0xFFFF;
+        return windowsError is 0x05 or 0x20 or 0x21;
+    }
+
     private static bool ShouldRetry(
         Exception exception,
         string destinationPath,

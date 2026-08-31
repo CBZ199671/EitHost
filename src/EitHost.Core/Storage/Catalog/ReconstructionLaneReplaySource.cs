@@ -6,6 +6,19 @@ using PureHDF;
 
 namespace EitHost.Core.Storage.Catalog;
 
+public sealed record ReconstructionLaneRoiFrame(
+    int BlockNumber,
+    double[] Conductivity,
+    int? ReferenceEpoch);
+
+public sealed record ReconstructionLaneRoiReadBatch(
+    IReadOnlyDictionary<int, ReconstructionLaneRoiFrame> FramesByBlock,
+    int ArtifactOpenCount);
+
+public sealed record ReconstructionLaneRoiReadProgress(
+    int CompletedFrameCount,
+    int TotalFrameCount);
+
 /// <summary>Read-only replay projection for one immutable, published reconstruction revision.</summary>
 public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
 {
@@ -144,6 +157,98 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
     public IReadOnlyList<ImagingReferenceCandidateRecord> ListReferenceCandidates(Guid imagingRunId) =>
         imagingRunId == experimentRunId ? canonical.ListReferenceCandidates(imagingRunId) : [];
 
+    public ReconstructionLaneRoiReadBatch ReadRoiFrames(
+        Guid imagingRunId,
+        ImagingRunDetail detail,
+        IReadOnlyCollection<int> blockNumbers,
+        IProgress<ReconstructionLaneRoiReadProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(detail);
+        ArgumentNullException.ThrowIfNull(blockNumbers);
+        if (imagingRunId != experimentRunId || detail.ImagingRunId != experimentRunId)
+        {
+            return new ReconstructionLaneRoiReadBatch(
+                new Dictionary<int, ReconstructionLaneRoiFrame>(),
+                ArtifactOpenCount: 0);
+        }
+
+        var requestedBlocks = blockNumbers.Distinct().ToArray();
+        var requestedFrames = requestedBlocks
+            .Select(block => framesByBlock.TryGetValue(block, out var frame) ? frame : null)
+            .Where(static frame => frame is not null)
+            .Cast<ReconstructionLaneFrameCatalogRecord>()
+            .ToArray();
+        var total = requestedBlocks.Length;
+        var completed = total - requestedFrames.Length;
+        var frames = new Dictionary<int, ReconstructionLaneRoiFrame>();
+        ReportRoiReadProgress(progress, completed, total, force: true);
+
+        var reconstructed = requestedFrames
+            .Where(frame => frame.Outcome == ReconstructionFrameOutcome.Reconstructed)
+            .ToArray();
+        foreach (var missing in reconstructed.Where(frame =>
+                     string.IsNullOrWhiteSpace(frame.ArtifactPath) ||
+                     string.IsNullOrWhiteSpace(frame.DatasetPath)))
+        {
+            throw new InvalidDataException(
+                $"Published reconstruction frame {missing.SourceBlockNumber} has no lane artifact dataset.");
+        }
+
+        completed += requestedFrames.Length - reconstructed.Length;
+        ReportRoiReadProgress(progress, completed, total, force: true);
+        var laneMetadata = ReconstructionMeshIndexMetadata.FromPersisted(
+            detail.MeshIndexSchema,
+            detail.ReconstructionParameterEntity,
+            detail.LogicalMeshFingerprint,
+            detail.OrderedIndexFingerprint,
+            detail.MeshCoordinateDecimals,
+            detail.MeshCoordinateQuantizationStep);
+        var artifactOpenCount = 0;
+        foreach (var artifactGroup in reconstructed.GroupBy(
+                     frame => frame.ArtifactPath!,
+                     StringComparer.OrdinalIgnoreCase))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var file = Hdf5FileAccess.OpenReadWithRetry(
+                layout.ResolveArtifactPath(artifactGroup.Key));
+            artifactOpenCount++;
+            foreach (var laneFrame in artifactGroup)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var conductivity = ReadRequiredConductivity(file, laneFrame);
+                var metadata = ReadReconstructionMetadata(file, laneFrame.SourceBlockNumber);
+                if (!string.IsNullOrWhiteSpace(metadata?.MeshFingerprint))
+                {
+                    if (string.IsNullOrWhiteSpace(detail.MeshFingerprint) ||
+                        !string.Equals(detail.MeshFingerprint, metadata.MeshFingerprint, StringComparison.Ordinal))
+                    {
+                        throw new InvalidDataException(
+                            $"Reconstruction frame mesh does not match lane mesh for block {laneFrame.SourceBlockNumber}.");
+                    }
+
+                    ValidateFrameMeshMetadata(metadata, laneMetadata);
+                    laneMetadata.ValidateForResult(
+                        detail.NodeCoords!,
+                        detail.CellConnectivity!,
+                        conductivity.Length,
+                        requireCanonical: !laneMetadata.UsesLegacyContract);
+                }
+
+                frames.Add(
+                    laneFrame.SourceBlockNumber,
+                    new ReconstructionLaneRoiFrame(
+                        laneFrame.SourceBlockNumber,
+                        conductivity,
+                        metadata?.ReferenceEpoch));
+                completed++;
+                ReportRoiReadProgress(progress, completed, total, force: completed == total);
+            }
+        }
+
+        return new ReconstructionLaneRoiReadBatch(frames, artifactOpenCount);
+    }
+
     public ImagingFrameDetail? GetFrame(Guid imagingRunId, int blockNumber)
     {
         if (imagingRunId != experimentRunId || !framesByBlock.TryGetValue(blockNumber, out var laneFrame))
@@ -159,34 +264,10 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
         var conditionNumber = frame.ReconstructionConditionNumber;
         var referenceEpoch = frame.ReferenceEpoch;
         DerivedReconstructionMetadata? metadata = null;
-        if (laneFrame.ArtifactPath is { } artifactPath && laneFrame.DatasetPath is { } datasetPath)
+        if (laneFrame.ArtifactPath is { } artifactPath && laneFrame.DatasetPath is not null)
         {
             using var file = Hdf5FileAccess.OpenReadWithRetry(layout.ResolveArtifactPath(artifactPath));
-            var conductivityPath = ResolveConductivityDatasetPath(datasetPath, blockNumber);
-            if (!file.LinkExists(conductivityPath))
-            {
-                throw new InvalidDataException(
-                    $"Lane artifact conductivity dataset is missing for block {blockNumber}: {conductivityPath}.");
-            }
-
-            try
-            {
-                conductivity = file.Dataset(conductivityPath).Read<double[]>();
-            }
-            catch (Exception ex) when (
-                ex is InvalidCastException ||
-                ex.Message.Contains("cannot be casted to IH5Dataset", StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidDataException(
-                    $"Lane artifact conductivity path is not a dataset for block {blockNumber}: {conductivityPath}.",
-                    ex);
-            }
-
-            if (conductivity.Length == 0 || conductivity.Any(value => !double.IsFinite(value)))
-            {
-                throw new InvalidDataException(
-                    $"Lane artifact conductivity dataset is empty or non-finite for block {blockNumber}: {conductivityPath}.");
-            }
+            conductivity = ReadRequiredConductivity(file, laneFrame);
 
             var blockRoot = DataRootLayout.GetDerivedBlockRoot(blockNumber);
             rawConductivity = ReadOptional<double[]>(file, $"{blockRoot}/reconstruction/raw_conductivity");
@@ -194,12 +275,8 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
             conditionNumber = ReadFiniteOptional(
                 file,
                 $"{blockRoot}/reconstruction/weighted_system_condition_number") ?? conditionNumber;
-            if (file.LinkExists($"{blockRoot}/metadata/reconstruction_json"))
-            {
-                metadata = JsonSerializer.Deserialize<DerivedReconstructionMetadata>(
-                    file.Dataset($"{blockRoot}/metadata/reconstruction_json").Read<string>());
-                referenceEpoch = metadata?.ReferenceEpoch ?? referenceEpoch;
-            }
+            metadata = ReadReconstructionMetadata(file, blockNumber);
+            referenceEpoch = metadata?.ReferenceEpoch ?? referenceEpoch;
         }
 
         if (conductivity is { Length: > 0 } && !string.IsNullOrWhiteSpace(metadata?.MeshFingerprint))
@@ -264,6 +341,63 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
         return string.Equals(normalized, historicalGroupPath, StringComparison.Ordinal)
             ? DataRootLayout.GetDerivedDatasetPath(blockNumber, "/reconstruction/conductivity")
             : recordedPath;
+    }
+
+    private static double[] ReadRequiredConductivity(
+        IH5Group file,
+        ReconstructionLaneFrameCatalogRecord laneFrame)
+    {
+        var blockNumber = laneFrame.SourceBlockNumber;
+        var conductivityPath = ResolveConductivityDatasetPath(laneFrame.DatasetPath!, blockNumber);
+        if (!file.LinkExists(conductivityPath))
+        {
+            throw new InvalidDataException(
+                $"Lane artifact conductivity dataset is missing for block {blockNumber}: {conductivityPath}.");
+        }
+
+        double[] conductivity;
+        try
+        {
+            conductivity = file.Dataset(conductivityPath).Read<double[]>();
+        }
+        catch (Exception ex) when (
+            ex is InvalidCastException ||
+            ex.Message.Contains("cannot be casted to IH5Dataset", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"Lane artifact conductivity path is not a dataset for block {blockNumber}: {conductivityPath}.",
+                ex);
+        }
+
+        if (conductivity.Length == 0 || conductivity.Any(value => !double.IsFinite(value)))
+        {
+            throw new InvalidDataException(
+                $"Lane artifact conductivity dataset is empty or non-finite for block {blockNumber}: {conductivityPath}.");
+        }
+
+        return conductivity;
+    }
+
+    private static DerivedReconstructionMetadata? ReadReconstructionMetadata(
+        IH5Group file,
+        int blockNumber)
+    {
+        var path = DataRootLayout.GetDerivedDatasetPath(blockNumber, "/metadata/reconstruction_json");
+        return file.LinkExists(path)
+            ? JsonSerializer.Deserialize<DerivedReconstructionMetadata>(file.Dataset(path).Read<string>())
+            : null;
+    }
+
+    private static void ReportRoiReadProgress(
+        IProgress<ReconstructionLaneRoiReadProgress>? progress,
+        int completed,
+        int total,
+        bool force)
+    {
+        if (progress is not null && (force || completed % 16 == 0))
+        {
+            progress.Report(new ReconstructionLaneRoiReadProgress(completed, total));
+        }
     }
 
     private static void ValidateFrameMeshMetadata(

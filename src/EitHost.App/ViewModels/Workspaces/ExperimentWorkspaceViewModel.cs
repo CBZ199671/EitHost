@@ -23,6 +23,7 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
     private readonly Func<string, string, bool> lifecycleConfirmation;
     private readonly Action<Guid, string, string> reconciliationScheduler;
     private readonly Func<Task> legacyReplayRefresh;
+    private Func<Guid, Task> prepareExperimentDeletion = static _ => Task.CompletedTask;
     private readonly Func<IReadOnlyList<EitCatalogRunSummary>>? legacyRunLoader;
     private readonly IReadOnlyList<EitCatalog> legacyCatalogReaders;
     private readonly Dictionary<Guid, string> imagingRunStorePaths = [];
@@ -119,6 +120,11 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
     public event Action<string>? StatusChanged;
 
     public event Action<string>? DiagnosticMessage;
+
+    internal void AttachExperimentDeletionPreparation(Func<Guid, Task> preparation)
+    {
+        prepareExperimentDeletion = preparation ?? throw new ArgumentNullException(nameof(preparation));
+    }
 
     public ExperimentDataToolsViewModel DataTools { get; }
 
@@ -857,6 +863,8 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
 
         try
         {
+            UpdateStatus("正在停止该实验的回放与 ROI 读取…", "busy");
+            await prepareExperimentDeletion(run.ExperimentRunId).ConfigureAwait(true);
             var result = await Task.Run(() => lifecycleService.Delete(run.ExperimentRunId)).ConfigureAwait(true);
             if (selectedExperimentRun?.ExperimentRunId == run.ExperimentRunId)
             {
@@ -874,10 +882,15 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
         }
         catch (Exception ex)
         {
+            if (selectedExperimentRun?.ExperimentRunId == run.ExperimentRunId)
+            {
+                SelectionChanged?.Invoke(selectedExperimentRun);
+            }
+
             UpdateStatus(
                 ex is ExperimentRunOperationConflictException
                     ? LifecycleCatchUpBusyMessage
-                    : $"删除失败；实验目录与 catalog 保持原状或已回滚：{ex.Message}",
+                    : $"删除未完成：{ex.Message}。实验仍在列表中，可重试。",
                 ex is ExperimentRunOperationConflictException ? "warning" : "error");
         }
     }

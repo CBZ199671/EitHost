@@ -143,7 +143,7 @@ public sealed class ExperimentDataLifecycleService : IExperimentDataLifecycleSer
             inspection.ManagedBytes));
         cancellationToken.ThrowIfCancellationRequested();
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-        Directory.Move(source, target);
+        AtomicFileCommitter.MoveDirectoryWithRetry(source, target);
         var archiveRelativePath = layout.ToRelativeArtifactPath(target);
         try
         {
@@ -191,7 +191,7 @@ public sealed class ExperimentDataLifecycleService : IExperimentDataLifecycleSer
         {
             staging = layout.CreateTrashStagingDirectoryPath(experimentRunId);
             Directory.CreateDirectory(Path.GetDirectoryName(staging)!);
-            Directory.Move(source, staging);
+            AtomicFileCommitter.MoveDirectoryWithRetry(source, staging);
         }
 
         try
@@ -319,7 +319,7 @@ public sealed class ExperimentDataLifecycleService : IExperimentDataLifecycleSer
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(originalPath)!);
-            Directory.Move(currentPath, originalPath);
+            AtomicFileCommitter.MoveDirectoryWithRetry(currentPath, originalPath);
         }
         catch (Exception rollbackError)
         {

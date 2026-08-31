@@ -23,6 +23,7 @@ internal sealed class ReplayVisualizationController : IDisposable
     private readonly Action<Action> postToUi;
     private readonly LatestOnlyAsyncWorker<ReplayRoiRebuildRequest> roiRebuildWorker;
     private readonly object replayFrameRequestGate = new();
+    private readonly object replayRoiCalculationGate = new();
     private readonly VisualizationRenderer.RealtimeImageRasterCache replayImageRasterCache = new();
     private bool frameStoreReady;
     private ImagingRunDetail? replayRunDetail;
@@ -34,6 +35,8 @@ internal sealed class ReplayVisualizationController : IDisposable
     private int replayFrameVersion;
     private ReplayFrameRequest? pendingReplayFrame;
     private TaskCompletionSource<object?>? replayFrameDrain;
+    private CancellationTokenSource? replayRoiCalculationCancellation;
+    private Task<ReplayRoiCalculationResult>? replayRoiCalculationTask;
     private int replayFrameWorkerActive;
     private int displayedReplayFrameIndex = -1;
     private DispatcherTimer? replayTimer;
@@ -43,6 +46,7 @@ internal sealed class ReplayVisualizationController : IDisposable
     private IReadOnlyList<FixedRoiTemporalAnalysis> replayFixedRoiAnalyses = [];
     private long replayCurveRebuildVersion;
     private long replayTemporalRebuildVersion;
+    private long replayRoiCalculationVersion;
     private ExperimentRunListItem? selectedCanonicalExperiment;
 
     internal ReplayVisualizationController(
@@ -112,11 +116,32 @@ internal sealed class ReplayVisualizationController : IDisposable
         workspace.SetActiveReplayLane(null, null);
         RaiseLaneCommandAvailability();
         StopPlayback();
+        CancelReplayRoiCalculation();
         Clear();
+    }
+
+    internal async Task ReleaseExperimentAsync(Guid experimentRunId)
+    {
+        if (selectedCanonicalExperiment?.ExperimentRunId != experimentRunId &&
+            replayRunDetail?.ImagingRunId != experimentRunId)
+        {
+            return;
+        }
+
+        selectedCanonicalExperiment = null;
+        workspace.SetReplayLaneAvailability(false, false);
+        RaiseLaneCommandAvailability();
+        StopPlayback();
+        Interlocked.Increment(ref replayLoadVersion);
+        Interlocked.Increment(ref replayFrameVersion);
+        var drain = CancelAndCaptureReplayWork();
+        Clear();
+        await DrainReplayWorkAsync(drain).ConfigureAwait(true);
     }
 
     internal void InvalidateRoi()
     {
+        CancelReplayRoiCalculation();
         replayRoiSeries = [];
         replayFixedRoiSamples = [];
         replayFixedRoiAnalysis = null;
@@ -325,7 +350,7 @@ internal sealed class ReplayVisualizationController : IDisposable
             new LegacyEitFrameReplaySource(new EitFrameStore(storePath))).ConfigureAwait(true);
     }
 
-    internal Task LoadCanonicalExperimentAsync(ExperimentRunListItem item)
+    internal async Task LoadCanonicalExperimentAsync(ExperimentRunListItem item)
     {
         selectedCanonicalExperiment = item;
         if (!item.IsCanonicalTerminal)
@@ -334,6 +359,7 @@ internal sealed class ReplayVisualizationController : IDisposable
             RaiseLaneCommandAvailability();
             StopPlayback();
             Interlocked.Increment(ref replayLoadVersion);
+            await DrainReplayWorkAsync(CancelAndCaptureReplayWork()).ConfigureAwait(true);
             Clear();
             StatusMessage = string.Equals(
                 item.Run?.Status,
@@ -341,7 +367,7 @@ internal sealed class ReplayVisualizationController : IDisposable
                 StringComparison.Ordinal)
                 ? "所选实验仍在记录中，已阻止回放读取；请先停止采集，待实验进入终态后再回放。"
                 : $"所选实验状态“{item.Run?.Status ?? "未知"}”不是可回放终态，已阻止回放读取。";
-            return Task.CompletedTask;
+            return;
         }
 
         var live = CanonicalSource.GetPublishedReconstructionRevision(
@@ -357,15 +383,16 @@ internal sealed class ReplayVisualizationController : IDisposable
         {
             StopPlayback();
             Interlocked.Increment(ref replayLoadVersion);
+            await DrainReplayWorkAsync(CancelAndCaptureReplayWork()).ConfigureAwait(true);
             Clear();
             workspace.SetActiveReplayLane(null, null);
             workspace.ReplayRunSummary = $"{item.Title} · 尚无已发布回放线路";
             workspace.ReplayFrameSummary = "实时线路只包含采集时已显示并提交的帧；离线线路需手动完整重算后发布。";
             workspace.ReplayLoadStatus = "回放状态：无已发布 live/offline-complete revision";
-            return Task.CompletedTask;
+            return;
         }
 
-        return LoadPublishedLaneAsync(item, selected);
+        await LoadPublishedLaneAsync(item, selected).ConfigureAwait(true);
     }
 
     private Task LoadPublishedLaneAsync(
@@ -429,6 +456,7 @@ internal sealed class ReplayVisualizationController : IDisposable
     {
         StopPlayback();
         var version = Interlocked.Increment(ref replayLoadVersion);
+        await DrainReplayWorkAsync(CancelAndCaptureReplayWork()).ConfigureAwait(true);
         Clear();
         if (runSource is ReconstructionLaneReplaySource laneSource)
         {
@@ -867,16 +895,46 @@ internal sealed class ReplayVisualizationController : IDisposable
             workspace.ReplayRoiSummary = "ROI：当前回放数据源未加载。";
             return;
         }
+
+        var calculationVersion = Interlocked.Increment(ref replayRoiCalculationVersion);
+        using var cancellation = new CancellationTokenSource();
+        var progress = new Progress<ReplayRoiProgress>(update =>
+        {
+            if (calculationVersion != Volatile.Read(ref replayRoiCalculationVersion) ||
+                roi.Revision != workspace.RoiDefinitionRevision)
+            {
+                return;
+            }
+
+            workspace.ReplayRoiSummary =
+                $"ROI：正在{update.Phase} {update.CompletedFrameCount}/{update.TotalFrameCount} 帧…";
+            StatusMessage = workspace.ReplayRoiSummary;
+            ReplayDataChanged?.Invoke();
+        });
+        workspace.ReplayRoiSummary = $"ROI：正在读取 0/{frames.Length} 帧…";
+        StatusMessage = workspace.ReplayRoiSummary;
+        ReplayDataChanged?.Invoke();
         try
         {
-            var calculation = await Task.Run(
+            var calculationTask = Task.Run(
                 () => CalculateReplayRoiSeries(
                     runSource,
                     detail,
                     frames,
                     roi,
-                    replayReferenceLockKinds)).ConfigureAwait(true);
-            if (roi.Revision != workspace.RoiDefinitionRevision)
+                    replayReferenceLockKinds,
+                    progress,
+                    cancellation.Token),
+                cancellation.Token);
+            lock (replayRoiCalculationGate)
+            {
+                replayRoiCalculationCancellation = cancellation;
+                replayRoiCalculationTask = calculationTask;
+            }
+
+            var calculation = await calculationTask.ConfigureAwait(true);
+            if (calculationVersion != Volatile.Read(ref replayRoiCalculationVersion) ||
+                roi.Revision != workspace.RoiDefinitionRevision)
             {
                 return;
             }
@@ -891,10 +949,30 @@ internal sealed class ReplayVisualizationController : IDisposable
             ReplayDataChanged?.Invoke();
             StatusMessage = $"ROI 离线计算完成：{calculation.Series.Count} 帧。";
         }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            if (calculationVersion == Volatile.Read(ref replayRoiCalculationVersion))
+            {
+                workspace.ReplayRoiSummary = "ROI：计算已取消。";
+                StatusMessage = workspace.ReplayRoiSummary;
+                ReplayDataChanged?.Invoke();
+            }
+        }
         catch (Exception ex)
         {
             workspace.ReplayRoiSummary = $"ROI 离线计算失败：{ex.Message}";
             StatusMessage = workspace.ReplayRoiSummary;
+        }
+        finally
+        {
+            lock (replayRoiCalculationGate)
+            {
+                if (ReferenceEquals(replayRoiCalculationCancellation, cancellation))
+                {
+                    replayRoiCalculationCancellation = null;
+                    replayRoiCalculationTask = null;
+                }
+            }
         }
     }
 
@@ -910,7 +988,9 @@ internal sealed class ReplayVisualizationController : IDisposable
         ImagingRunDetail detail,
         IReadOnlyList<ImagingFrameIndexEntry> frames,
         RoiSelectionSnapshot roi,
-        IReadOnlyDictionary<int, string> referenceLockKinds)
+        IReadOnlyDictionary<int, string> referenceLockKinds,
+        IProgress<ReplayRoiProgress>? progress,
+        CancellationToken cancellationToken)
     {
         var points = new List<RoiCurvePoint>(frames.Count);
         var fixedSamples = new List<FixedRoiTemporalSample>(frames.Count);
@@ -921,10 +1001,59 @@ internal sealed class ReplayVisualizationController : IDisposable
                 .Select((cell, index) => (cell, index))
                 .First(item => string.Equals(item.cell.Id, roi.FixedCell.Id, StringComparison.Ordinal))
                 .index;
+        IReadOnlyDictionary<int, ReconstructionLaneRoiFrame>? laneFrames = null;
+        if (runSource is ReconstructionLaneReplaySource laneSource)
+        {
+            var laneProgress = new CallbackProgress<ReconstructionLaneRoiReadProgress>(update =>
+                progress?.Report(new ReplayRoiProgress(
+                    "读取",
+                    update.CompletedFrameCount,
+                    update.TotalFrameCount)));
+            laneFrames = laneSource.ReadRoiFrames(
+                detail.ImagingRunId,
+                detail,
+                frames.Select(frame => frame.BlockNumber).ToArray(),
+                laneProgress,
+                cancellationToken).FramesByBlock;
+        }
+
         for (var index = 0; index < frames.Count; index++)
         {
-            var frame = runSource.GetFrame(detail.ImagingRunId, frames[index].BlockNumber);
-            if (frame?.Conductivity is not { Length: > 0 } conductivity)
+            cancellationToken.ThrowIfCancellationRequested();
+            var entry = frames[index];
+            double[]? conductivity;
+            int? referenceEpoch;
+            DateTimeOffset capturedAt;
+            double qualityWeight;
+            if (laneFrames is not null)
+            {
+                if (!laneFrames.TryGetValue(entry.BlockNumber, out var laneFrame))
+                {
+                    ReportReplayRoiProgress(progress, "计算", index + 1, frames.Count);
+                    continue;
+                }
+
+                conductivity = laneFrame.Conductivity;
+                referenceEpoch = laneFrame.ReferenceEpoch;
+                capturedAt = entry.CapturedAt;
+                qualityWeight = entry.QualityWeight;
+            }
+            else
+            {
+                var frame = runSource.GetFrame(detail.ImagingRunId, entry.BlockNumber);
+                if (frame?.Conductivity is not { Length: > 0 } frameConductivity)
+                {
+                    ReportReplayRoiProgress(progress, "计算", index + 1, frames.Count);
+                    continue;
+                }
+
+                conductivity = frameConductivity;
+                referenceEpoch = frame.ReferenceEpoch;
+                capturedAt = frame.CapturedAt;
+                qualityWeight = frame.QualityWeight;
+            }
+
+            if (conductivity is not { Length: > 0 })
             {
                 continue;
             }
@@ -941,20 +1070,20 @@ internal sealed class ReplayVisualizationController : IDisposable
                     detail.ReconstructionParameterEntity);
                 fixedSamples.Add(FixedRoiTemporalSample.FromMeasurements(
                     index + 1,
-                    frame.BlockNumber,
-                    frame.CapturedAt,
-                    frame.QualityWeight,
+                    entry.BlockNumber,
+                    capturedAt,
+                    qualityWeight,
                     measurements,
-                    frame.ReferenceEpoch,
-                    RoiVisualizationEngine.ResolveReferenceLockKind(frame.ReferenceEpoch, referenceLockKinds)));
+                    referenceEpoch,
+                    RoiVisualizationEngine.ResolveReferenceLockKind(referenceEpoch, referenceLockKinds)));
                 point = RoiVisualizationEngine.CreateRoiCurvePointFromMeasurement(
                     detail.SetLabel,
                     index + 1,
-                    frame.BlockNumber,
-                    frame.CapturedAt,
-                    frame.QualityWeight,
-                    frame.ReferenceEpoch,
-                    RoiVisualizationEngine.ResolveReferenceLockKind(frame.ReferenceEpoch, referenceLockKinds),
+                    entry.BlockNumber,
+                    capturedAt,
+                    qualityWeight,
+                    referenceEpoch,
+                    RoiVisualizationEngine.ResolveReferenceLockKind(referenceEpoch, referenceLockKinds),
                     measurements[fixedCellIndex],
                     roi);
             }
@@ -963,11 +1092,11 @@ internal sealed class ReplayVisualizationController : IDisposable
                 point = RoiVisualizationEngine.CreateRoiCurvePoint(
                     detail.SetLabel,
                     index + 1,
-                    frame.BlockNumber,
-                    frame.CapturedAt,
-                    frame.QualityWeight,
-                    frame.ReferenceEpoch,
-                    RoiVisualizationEngine.ResolveReferenceLockKind(frame.ReferenceEpoch, referenceLockKinds),
+                    entry.BlockNumber,
+                    capturedAt,
+                    qualityWeight,
+                    referenceEpoch,
+                    RoiVisualizationEngine.ResolveReferenceLockKind(referenceEpoch, referenceLockKinds),
                     conductivity,
                     detail.NodeCoords!,
                     detail.CellConnectivity!,
@@ -978,6 +1107,8 @@ internal sealed class ReplayVisualizationController : IDisposable
             {
                 points.Add(point);
             }
+
+            ReportReplayRoiProgress(progress, "计算", index + 1, frames.Count);
         }
 
         return new ReplayRoiCalculationResult(points, fixedSamples);
@@ -1016,6 +1147,18 @@ internal sealed class ReplayVisualizationController : IDisposable
         workspace.ReplayRoiAxisStart = chart.AxisStart;
         workspace.ReplayRoiAxisMiddle = chart.AxisMiddle;
         workspace.ReplayRoiAxisEnd = chart.AxisEnd;
+    }
+
+    private static void ReportReplayRoiProgress(
+        IProgress<ReplayRoiProgress>? progress,
+        string phase,
+        int completed,
+        int total)
+    {
+        if (progress is not null && (completed == total || completed % 16 == 0))
+        {
+            progress.Report(new ReplayRoiProgress(phase, completed, total));
+        }
     }
 
     private void ToggleReplayPlayback()
@@ -1106,6 +1249,51 @@ internal sealed class ReplayVisualizationController : IDisposable
         displayedReplayFrameIndex = -1;
     }
 
+    private (Task FrameDrain, Task RoiDrain) CancelAndCaptureReplayWork()
+    {
+        Interlocked.Increment(ref replayRoiCalculationVersion);
+        Task frameDrain;
+        lock (replayFrameRequestGate)
+        {
+            pendingReplayFrame = null;
+            frameDrain = replayFrameDrain?.Task ?? Task.CompletedTask;
+        }
+
+        Task roiDrain;
+        lock (replayRoiCalculationGate)
+        {
+            replayRoiCalculationCancellation?.Cancel();
+            roiDrain = replayRoiCalculationTask ?? Task.CompletedTask;
+        }
+
+        return (frameDrain, roiDrain);
+    }
+
+    private void CancelReplayRoiCalculation()
+    {
+        Interlocked.Increment(ref replayRoiCalculationVersion);
+        lock (replayRoiCalculationGate)
+        {
+            replayRoiCalculationCancellation?.Cancel();
+        }
+    }
+
+    private async Task DrainReplayWorkAsync((Task FrameDrain, Task RoiDrain) drain)
+    {
+        try
+        {
+            await Task.WhenAll(drain.FrameDrain, drain.RoiDrain).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation is the expected lane/run/delete hand-off path.
+        }
+        catch (Exception ex)
+        {
+            PublishDiagnostic($"Replay reader drain completed with an error: {ex.Message}");
+        }
+    }
+
     private void RestoreDisplayedReplayFrameIndex()
     {
         if (displayedReplayFrameIndex >= 0)
@@ -1172,11 +1360,22 @@ internal sealed class ReplayVisualizationController : IDisposable
     public void Dispose()
     {
         replayTimer?.Stop();
+        CancelReplayRoiCalculation();
         roiRebuildWorker.Cancel();
         roiRebuildWorker.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
     private sealed record ReplayFrameRequest(int Index, int Version);
+
+    private sealed record ReplayRoiProgress(
+        string Phase,
+        int CompletedFrameCount,
+        int TotalFrameCount);
+
+    private sealed class CallbackProgress<T>(Action<T> callback) : IProgress<T>
+    {
+        public void Report(T value) => callback(value);
+    }
 
     private sealed record ReplayRoiRebuildRequest(
         long CurveVersion,

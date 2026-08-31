@@ -410,6 +410,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
         var replay = new ReplayVisualizationController(VisualizationWorkspace, dataLayout, canonicalReplaySource,
             () => RealtimeImagePolarity, () => RealtimeImageGain, PostToUi);
         VisualizationWorkspace.AttachReplayController(replay);
+        ExperimentWorkspace.AttachExperimentDeletionPreparation(replay.ReleaseExperimentAsync);
         VisualizationWorkspace.AttachRealtimePreviewController(new RealtimePreviewController(
             VisualizationWorkspace,
             realtimePreviewState,
