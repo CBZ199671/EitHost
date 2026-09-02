@@ -261,7 +261,10 @@ internal sealed class RealtimeReconstructionController
             acquiredAt).ConfigureAwait(false);
 
         UpdateContactSubspaceEvidence(state, result);
-        state.RoiGeometry = new RealtimeRoiGeometry(result.NodeCoords, result.CellConnectivity);
+        state.RoiGeometry = new RealtimeRoiGeometry(
+            result.NodeCoords,
+            result.CellConnectivity,
+            result.GetMeshIndexMetadata());
         var completedFrames = state.RecordReconstructionSuccess(result.BackendElapsed, degradedDemodulation);
         var imageQualityScore = RefineImageQuality(contactResult, result);
         if (imageQualityCap is { } qualityCap)

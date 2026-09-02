@@ -244,6 +244,32 @@ public sealed class GlobalReconstructionMeshStore(
         return LoadArtifact(artifactPath, expected, metadata);
     }
 
+    public ReconstructionMeshSnapshot? TryLoadBound()
+    {
+        lock (BindingGate)
+        {
+            var binding = ReadBinding();
+            if (binding is null)
+            {
+                return null;
+            }
+
+            var snapshot = LoadArtifact(
+                binding.ArtifactPath,
+                binding.Fingerprint,
+                binding.ToMetadata());
+            EnsureBindingMatches(
+                binding,
+                CanonicalMeshBinding.From(
+                    snapshot.Fingerprint,
+                    snapshot.ArtifactPath,
+                    snapshot.NodeCoords,
+                    snapshot.CellConnectivity,
+                    snapshot.MeshIndexMetadata));
+            return snapshot;
+        }
+    }
+
     private ReconstructionMeshSnapshot LoadArtifact(
         string artifactPath,
         string? expectedFingerprint,

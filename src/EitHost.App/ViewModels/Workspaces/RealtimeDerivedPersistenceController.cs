@@ -100,7 +100,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
             block.EndSampleIndex,
             ModelRelativeValue: 1.0);
         var key = (evidence.ExperimentRunId, evidence.SourceBlockNumber);
-        var task = PersistTrustedNeutralEvidenceCoreAsync(config.SetLabel, evidence);
+        var task = PersistTrustedNeutralEvidenceCoreAsync(config, state, evidence);
         pendingTrustedNeutralEvidence[key] = task;
         _ = task.ContinueWith(
             (_, callbackState) =>
@@ -115,7 +115,8 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
     }
 
     private async Task PersistTrustedNeutralEvidenceCoreAsync(
-        string setLabel,
+        RealtimeImagingRunConfig config,
+        RealtimeRunState state,
         RealtimeRoiEvidenceCatalogRecord evidence)
     {
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -137,6 +138,15 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
                                 evidence.ProcessedAt);
                         }
 
+                        if (Volatile.Read(ref state.DerivedMeshPersisted) == 0 ||
+                            state.RoiGeometry is null)
+                        {
+                            _ = AttachBoundMeshToRun(
+                                evidence.ExperimentRunId,
+                                evidence.ProcessedAt,
+                                state);
+                        }
+
                         completion.TrySetResult(true);
                     }
                     catch (Exception ex)
@@ -152,7 +162,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         catch (Exception ex)
         {
             diagnostic(
-                $"{setLabel} trusted-neutral ROI evidence failed block={evidence.SourceBlockNumber}: {ex.Message}");
+                $"{config.SetLabel} trusted-neutral ROI evidence failed block={evidence.SourceBlockNumber}: {ex.Message}");
         }
     }
 
@@ -285,6 +295,45 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         }
 
         return meshReference;
+    }
+
+    private ReconstructionMeshSnapshot? AttachBoundMeshToRun(
+        Guid experimentRunId,
+        DateTimeOffset observedAt,
+        RealtimeRunState? state = null)
+    {
+        var mesh = meshStore.TryLoadBound();
+        if (mesh is null)
+        {
+            return null;
+        }
+
+        if (state?.CanonicalMeshFingerprint is { } currentFingerprint &&
+            !string.Equals(currentFingerprint, mesh.Fingerprint, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Trusted-neutral canonical mesh changed within one run: " +
+                $"{currentFingerprint} -> {mesh.Fingerprint}.");
+        }
+
+        catalog.RegisterDerivedArtifact(new DerivedArtifactCatalogRecord(
+            experimentRunId,
+            -1,
+            "mesh",
+            mesh.ArtifactPath,
+            "/mesh",
+            observedAt));
+        if (state is not null)
+        {
+            state.CanonicalMeshFingerprint = mesh.Fingerprint;
+            state.RoiGeometry ??= new RealtimeRoiGeometry(
+                mesh.NodeCoords,
+                mesh.CellConnectivity,
+                mesh.MeshIndexMetadata);
+            Interlocked.Exchange(ref state.DerivedMeshPersisted, 1);
+        }
+
+        return mesh;
     }
 
     private async Task PersistReconstructionResultCoreAsync(
@@ -455,9 +504,23 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
                 experimentRunId,
                 ReconstructionLane.Live,
                 LiveRevisionId);
+            if (revision?.IsPublished == true)
+            {
+                return;
+            }
+
+            var evidence = catalog.ListRealtimeRoiEvidence(experimentRunId, LiveRevisionId);
+            if (evidence.Count > 0 &&
+                AttachBoundMeshToRun(
+                    experimentRunId,
+                    evidence.Min(item => item.ProcessedAt)) is null)
+            {
+                diagnostic(
+                    $"run {experimentRunId:D} trusted-neutral ROI unavailable: canonical mesh binding missing; evidence retained");
+            }
+
             if (revision is null)
             {
-                var evidence = catalog.ListRealtimeRoiEvidence(experimentRunId, LiveRevisionId);
                 if (evidence.Count == 0)
                 {
                     return;

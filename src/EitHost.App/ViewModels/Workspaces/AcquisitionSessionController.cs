@@ -9,11 +9,14 @@ namespace EitHost.App.ViewModels.Workspaces;
 
 internal sealed class AcquisitionSessionController : IDisposable
 {
+    private static readonly TimeSpan DefaultOperatorStopWaitTimeout = TimeSpan.FromMilliseconds(2800);
+
     private readonly IUsb2070NativeApi nativeApi;
     private readonly Func<bool> memoryPressureProbe;
     private readonly Func<ActiveBufferedAcquisitionSession<PairingSummaryItem>, ushort[], DateTimeOffset, string, BufferedAcquisitionAutoFlushResult> autoFlush;
     private readonly Action<ActiveBufferedAcquisitionSession<PairingSummaryItem>, long, long>? valuesDropped;
     private readonly Action<string> log;
+    private readonly TimeSpan operatorStopWaitTimeout;
     private readonly ConcurrentDictionary<string, ActiveBufferedAcquisitionSession<PairingSummaryItem>> sessions =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, ActiveBufferedAcquisitionSession<PairingSummaryItem>> stoppingSessions =
@@ -27,13 +30,21 @@ internal sealed class AcquisitionSessionController : IDisposable
         Func<bool> memoryPressureProbe,
         Func<ActiveBufferedAcquisitionSession<PairingSummaryItem>, ushort[], DateTimeOffset, string, BufferedAcquisitionAutoFlushResult> autoFlush,
         Action<ActiveBufferedAcquisitionSession<PairingSummaryItem>, long, long>? valuesDropped,
-        Action<string> log)
+        Action<string> log,
+        TimeSpan? operatorStopWaitTimeout = null)
     {
         this.nativeApi = nativeApi ?? throw new ArgumentNullException(nameof(nativeApi));
         this.memoryPressureProbe = memoryPressureProbe ?? throw new ArgumentNullException(nameof(memoryPressureProbe));
         this.autoFlush = autoFlush ?? throw new ArgumentNullException(nameof(autoFlush));
         this.valuesDropped = valuesDropped;
         this.log = log ?? throw new ArgumentNullException(nameof(log));
+        if (operatorStopWaitTimeout is { } configuredOperatorStopWaitTimeout &&
+            configuredOperatorStopWaitTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(operatorStopWaitTimeout));
+        }
+
+        this.operatorStopWaitTimeout = operatorStopWaitTimeout ?? DefaultOperatorStopWaitTimeout;
     }
 
     internal int ActiveCount => sessions.Count + stoppingSessions.Count;
@@ -236,9 +247,63 @@ internal sealed class AcquisitionSessionController : IDisposable
 
         activeSession = removedSession;
 
+        var stopTask = activeSession.StopAsync();
+        if (!stopTask.IsCompleted)
+        {
+            var completed = await Task.WhenAny(
+                stopTask,
+                Task.Delay(operatorStopWaitTimeout)).ConfigureAwait(true);
+            if (completed != stopTask)
+            {
+                _ = FinalizeStoppingInBackgroundAsync(pairing, activeSession, stopTask, logMessage);
+                var drainingSummary =
+                    $"{pairing.Title} 停止请求已发送；读取或自动落盘任务仍在退出，正在后台安全清理，完成前不可重新启动。";
+                LogLifecycleBestEffort(
+                    $"{DateTime.Now:HH:mm:ss} {pairing.Title} AD stop draining in background");
+                return new AcquisitionStopOutcome(true, drainingSummary, IsDraining: true);
+            }
+        }
+
+        return await FinalizeStoppingSessionAsync(
+            pairing,
+            activeSession,
+            stopTask,
+            logMessage).ConfigureAwait(true);
+    }
+
+    private async Task FinalizeStoppingInBackgroundAsync(
+        PairingSummaryItem pairing,
+        ActiveBufferedAcquisitionSession<PairingSummaryItem> activeSession,
+        Task stopTask,
+        string? logMessage)
+    {
         try
         {
-            await activeSession.StopAsync().ConfigureAwait(true);
+            _ = await FinalizeStoppingSessionAsync(
+                pairing,
+                activeSession,
+                stopTask,
+                logMessage).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            if (!IsDisposed)
+            {
+                LogLifecycleBestEffort(
+                    $"{DateTime.Now:HH:mm:ss} {pairing.Title} AD background stop failed {ex.Message}");
+            }
+        }
+    }
+
+    private async Task<AcquisitionStopOutcome> FinalizeStoppingSessionAsync(
+        PairingSummaryItem pairing,
+        ActiveBufferedAcquisitionSession<PairingSummaryItem> activeSession,
+        Task stopTask,
+        string? logMessage)
+    {
+        try
+        {
+            await stopTask.ConfigureAwait(true);
             string summary;
             if (activeSession.BufferedValueCount > 0)
             {
@@ -257,13 +322,22 @@ internal sealed class AcquisitionSessionController : IDisposable
                 log($"{DateTime.Now:HH:mm:ss} {logMessage ?? $"{pairing.Title} AD buffer stop"} no buffered data");
             }
 
-            LogStopWarnings(pairing, activeSession);
-            return new AcquisitionStopOutcome(true, summary);
+            return new AcquisitionStopOutcome(true, summary, IsDraining: false);
         }
         finally
         {
-            activeSession.Dispose();
-            stoppingSessions.TryRemove(pairing.Title, out _);
+            try
+            {
+                if (!IsDisposed)
+                {
+                    LogStopWarnings(pairing, activeSession);
+                }
+            }
+            finally
+            {
+                activeSession.Dispose();
+                stoppingSessions.TryRemove(pairing.Title, out _);
+            }
         }
     }
 
@@ -409,6 +483,18 @@ internal sealed class AcquisitionSessionController : IDisposable
         }
     }
 
+    private void LogLifecycleBestEffort(string message)
+    {
+        try
+        {
+            log(message);
+        }
+        catch
+        {
+            // A UI/log sink cannot own or interrupt the USB cleanup lifecycle.
+        }
+    }
+
     internal static CapturedRawBlock CreateCapturedRawBlock(
         PairingSummaryItem pairing,
         DateTimeOffset capturedAt,
@@ -436,7 +522,10 @@ internal sealed record AcquisitionBufferPolicy(
     long CompressionStartByteThreshold,
     TimeSpan CompressionYieldDelay);
 
-internal sealed record AcquisitionStopOutcome(bool WasActive, string? CaptureSummary);
+internal sealed record AcquisitionStopOutcome(
+    bool WasActive,
+    string? CaptureSummary,
+    bool IsDraining = false);
 
 internal sealed record BufferedAcquisitionPreviewData(
     string SetLabel,

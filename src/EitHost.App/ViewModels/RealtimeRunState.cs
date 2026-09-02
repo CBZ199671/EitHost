@@ -71,6 +71,8 @@ internal sealed class RealtimeRunState : ReferenceReconstructionCoordinator
     internal LatestOnlyAsyncWorker<RealtimeVisualizationWorkItem>? VisualizationWorker { get; set; }
     internal VisualizationRenderer.RealtimeImageRasterCache ImageRasterCache { get; } = new();
     internal volatile RealtimeRoiGeometry? RoiGeometry;
+    internal object PendingNeutralRoiGate { get; } = new();
+    internal List<RealtimeNeutralRoiSample> PendingNeutralRoiSamples { get; } = [];
     internal EcdCwrConsecutiveCenteredWindow<RealtimeTemporalCandidate> TemporalWindow { get; } = new();
     internal RealtimeSampleContinuityMonitor SampleContinuity { get; } = new();
     internal int BlocksProcessed;

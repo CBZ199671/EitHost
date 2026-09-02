@@ -1,6 +1,7 @@
 using System.Windows.Media;
 using EitHost.Core.Analysis;
 using EitHost.Core.Diagnostics;
+using EitHost.Core.Reconstruction;
 
 namespace EitHost.App.ViewModels;
 
@@ -17,7 +18,15 @@ internal sealed record RealtimeRoiPreviewSnapshot(
 
 internal sealed record RealtimeRoiGeometry(
     double[,] NodeCoords,
-    int[,] CellConnectivity);
+    int[,] CellConnectivity,
+    ReconstructionMeshIndexMetadata MeshIndexMetadata);
+
+internal sealed record RealtimeNeutralRoiSample(
+    int BlockNumber,
+    double QualityWeight,
+    DateTimeOffset ObservedAt,
+    int? ReferenceEpoch,
+    string ReferenceLockKind);
 
 internal static class RoiValueSource
 {

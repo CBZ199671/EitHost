@@ -9,6 +9,9 @@ namespace EitHost.App.ViewModels.Workspaces;
 
 internal sealed class HardwareSyncController : IEitSetSyncController
 {
+    private static readonly TimeSpan DefaultOperatorStopWaitTimeout = TimeSpan.FromMilliseconds(2800);
+
+    private readonly object lifecycleGate = new();
     private readonly PairingSummaryItem pairing;
     private readonly IUsb2070NativeApi usb2070NativeApi;
     private readonly Usb2070Device usbDevice;
@@ -26,7 +29,10 @@ internal sealed class HardwareSyncController : IEitSetSyncController
     private readonly Func<bool> isMemoryPressureHigh;
     private readonly Func<ActiveBufferedAcquisitionSession<PairingSummaryItem>, ushort[], DateTimeOffset, string, BufferedAcquisitionAutoFlushResult> autoFlush;
     private readonly Action<ActiveBufferedAcquisitionSession<PairingSummaryItem>, long, long>? valuesDropped;
+    private readonly TimeSpan operatorStopWaitTimeout;
+    private readonly TimeSpan? readerStopWaitTimeout;
     private ActiveBufferedAcquisitionSession<PairingSummaryItem>? startedSession;
+    private Task? stoppingSessionTask;
 
     internal HardwareSyncController(
         PairingSummaryItem pairing,
@@ -45,7 +51,9 @@ internal sealed class HardwareSyncController : IEitSetSyncController
         TimeSpan compressionYieldDelay,
         Func<bool> isMemoryPressureHigh,
         Func<ActiveBufferedAcquisitionSession<PairingSummaryItem>, ushort[], DateTimeOffset, string, BufferedAcquisitionAutoFlushResult> autoFlush,
-        Action<ActiveBufferedAcquisitionSession<PairingSummaryItem>, long, long>? valuesDropped)
+        Action<ActiveBufferedAcquisitionSession<PairingSummaryItem>, long, long>? valuesDropped,
+        TimeSpan? operatorStopWaitTimeout = null,
+        TimeSpan? readerStopWaitTimeout = null)
     {
         this.pairing = pairing;
         this.usb2070NativeApi = usb2070NativeApi;
@@ -64,6 +72,20 @@ internal sealed class HardwareSyncController : IEitSetSyncController
         this.isMemoryPressureHigh = isMemoryPressureHigh;
         this.autoFlush = autoFlush;
         this.valuesDropped = valuesDropped;
+        if (operatorStopWaitTimeout is { } configuredOperatorStopWaitTimeout &&
+            configuredOperatorStopWaitTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(operatorStopWaitTimeout));
+        }
+
+        if (readerStopWaitTimeout is { } configuredReaderStopWaitTimeout &&
+            configuredReaderStopWaitTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(readerStopWaitTimeout));
+        }
+
+        this.operatorStopWaitTimeout = operatorStopWaitTimeout ?? DefaultOperatorStopWaitTimeout;
+        this.readerStopWaitTimeout = readerStopWaitTimeout;
     }
 
     public string Label => pairing.Title;
@@ -73,38 +95,43 @@ internal sealed class HardwareSyncController : IEitSetSyncController
     public Task StartAcquisitionAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (startedSession is not null)
+        lock (lifecycleGate)
         {
-            throw new InvalidOperationException($"{Label} 已经在采集中。");
-        }
+            if (startedSession is not null)
+            {
+                throw new InvalidOperationException($"{Label} 已经在采集中。");
+            }
 
-        Usb2070Session? session = null;
-        try
-        {
-            var service = new Usb2070Service(usb2070NativeApi);
-            session = service.Open(usbDevice);
-            session.StartAcquisition(acquisitionSettings);
-            var metadata = session.LastAcquisitionMetadata ?? fallbackAcquisitionMetadata;
-            startedSession = new ActiveBufferedAcquisitionSession<PairingSummaryItem>(
-                pairing,
-                session,
-                metadata,
-                excitationMetadata,
-                readValueCount,
-                autoFlushByteThreshold,
-                maxBufferedByteCount,
-                readLoopIdleDelay,
-                compressionStartByteThreshold,
-                compressionYieldDelay,
-                isMemoryPressureHigh,
-                autoFlush,
-                valuesDropped);
-            session = null;
-            return Task.CompletedTask;
-        }
-        finally
-        {
-            session?.Dispose();
+            stoppingSessionTask = null;
+            Usb2070Session? session = null;
+            try
+            {
+                var service = new Usb2070Service(usb2070NativeApi);
+                session = service.Open(usbDevice);
+                session.StartAcquisition(acquisitionSettings);
+                var metadata = session.LastAcquisitionMetadata ?? fallbackAcquisitionMetadata;
+                startedSession = new ActiveBufferedAcquisitionSession<PairingSummaryItem>(
+                    pairing,
+                    session,
+                    metadata,
+                    excitationMetadata,
+                    readValueCount,
+                    autoFlushByteThreshold,
+                    maxBufferedByteCount,
+                    readLoopIdleDelay,
+                    compressionStartByteThreshold,
+                    compressionYieldDelay,
+                    isMemoryPressureHigh,
+                    autoFlush,
+                    valuesDropped,
+                    readerStopWaitTimeout);
+                session = null;
+                return Task.CompletedTask;
+            }
+            finally
+            {
+                session?.Dispose();
+            }
         }
     }
 
@@ -122,19 +149,65 @@ internal sealed class HardwareSyncController : IEitSetSyncController
 
     public async Task StopAcquisitionAsync(CancellationToken cancellationToken = default)
     {
-        if (startedSession is null)
+        Task stopTask;
+        lock (lifecycleGate)
         {
-            return;
+            if (startedSession is null)
+            {
+                return;
+            }
+
+            if (stoppingSessionTask is null)
+            {
+                stoppingSessionTask = StopAndReleaseSessionAsync(startedSession);
+                _ = ObserveStopCompletionAsync(stoppingSessionTask);
+            }
+
+            stopTask = stoppingSessionTask;
         }
 
         try
         {
-            await startedSession.StopAsync().ConfigureAwait(false);
+            await stopTask.WaitAsync(operatorStopWaitTimeout, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (TimeoutException ex) when (!stopTask.IsCompleted)
+        {
+            throw new TimeoutException(
+                $"{Label} 采集停止清理超时；读取或自动落盘资源仍在后台安全清理。",
+                ex);
+        }
+    }
+
+    private static async Task ObserveStopCompletionAsync(Task stopTask)
+    {
+        try
+        {
+            await stopTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            // The bounded caller receives an immediate failure when possible; a later
+            // terminal fault is observed here after ownership-safe background drain.
+        }
+    }
+
+    private async Task StopAndReleaseSessionAsync(
+        ActiveBufferedAcquisitionSession<PairingSummaryItem> session)
+    {
+        try
+        {
+            await session.StopAsync().ConfigureAwait(false);
         }
         finally
         {
-            startedSession.Dispose();
-            startedSession = null;
+            session.Dispose();
+            lock (lifecycleGate)
+            {
+                if (ReferenceEquals(startedSession, session))
+                {
+                    startedSession = null;
+                }
+            }
         }
     }
 
@@ -147,13 +220,16 @@ internal sealed class HardwareSyncController : IEitSetSyncController
 
     internal ActiveBufferedAcquisitionSession<PairingSummaryItem> TakeStartedSession()
     {
-        if (startedSession is null)
+        lock (lifecycleGate)
         {
-            throw new InvalidOperationException($"{Label} 同步采集会话未启动。");
-        }
+            if (startedSession is null || stoppingSessionTask is not null)
+            {
+                throw new InvalidOperationException($"{Label} 同步采集会话未启动。");
+            }
 
-        var session = startedSession;
-        startedSession = null;
-        return session;
+            var session = startedSession;
+            startedSession = null;
+            return session;
+        }
     }
 }

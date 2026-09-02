@@ -7,7 +7,7 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
 {
     private const int MaxAutoFlushConcurrency = 2;
 
-    private static readonly TimeSpan StopWaitTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan DefaultReaderStopWaitTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan StopInitialBufferWaitTimeout = TimeSpan.FromMilliseconds(300);
     private static readonly TimeSpan DisposeDrainWaitTimeout = TimeSpan.FromMilliseconds(750);
 
@@ -22,6 +22,7 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
     private readonly TimeSpan readLoopIdleDelay;
     private readonly long compressionStartByteThreshold;
     private readonly TimeSpan compressionYieldDelay;
+    private readonly TimeSpan readerStopWaitTimeout;
     private readonly Func<bool> isMemoryPressureHigh;
     private readonly Func<ActiveBufferedAcquisitionSession<TPairing>, ushort[], DateTimeOffset, string, BufferedAcquisitionAutoFlushResult> autoFlush;
     private readonly Action<ActiveBufferedAcquisitionSession<TPairing>, long, long>? valuesDropped;
@@ -60,7 +61,8 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
         TimeSpan compressionYieldDelay,
         Func<bool> isMemoryPressureHigh,
         Func<ActiveBufferedAcquisitionSession<TPairing>, ushort[], DateTimeOffset, string, BufferedAcquisitionAutoFlushResult> autoFlush,
-        Action<ActiveBufferedAcquisitionSession<TPairing>, long, long>? valuesDropped = null)
+        Action<ActiveBufferedAcquisitionSession<TPairing>, long, long>? valuesDropped = null,
+        TimeSpan? readerStopWaitTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(pairing);
         ArgumentNullException.ThrowIfNull(usbSession);
@@ -72,6 +74,11 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(autoFlushByteThreshold);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxBufferedByteCount);
         ArgumentOutOfRangeException.ThrowIfNegative(compressionStartByteThreshold);
+        if (readerStopWaitTimeout is { } configuredReaderStopWaitTimeout &&
+            configuredReaderStopWaitTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(readerStopWaitTimeout));
+        }
 
         Pairing = pairing;
         UsbSession = usbSession;
@@ -83,6 +90,7 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
         this.readLoopIdleDelay = readLoopIdleDelay;
         this.compressionStartByteThreshold = compressionStartByteThreshold;
         this.compressionYieldDelay = compressionYieldDelay;
+        this.readerStopWaitTimeout = readerStopWaitTimeout ?? DefaultReaderStopWaitTimeout;
         this.isMemoryPressureHigh = isMemoryPressureHigh;
         this.autoFlush = autoFlush;
         this.valuesDropped = valuesDropped;
@@ -353,7 +361,7 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
             StopFailure = ex;
         }
 
-        var completed = await Task.WhenAny(readerTask, Task.Delay(StopWaitTimeout)).ConfigureAwait(false);
+        var completed = await Task.WhenAny(readerTask, Task.Delay(readerStopWaitTimeout)).ConfigureAwait(false);
         if (completed != readerTask)
         {
             ReaderFailure ??= new TimeoutException("USB2070 后台读取线程停止超时。");

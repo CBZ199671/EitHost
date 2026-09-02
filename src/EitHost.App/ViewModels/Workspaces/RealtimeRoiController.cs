@@ -63,6 +63,30 @@ internal sealed class RealtimeRoiController
         RealtimeRunState state,
         string valueSource = RoiValueSource.InverseReconstruction)
     {
+        if (!string.Equals(valueSource, RoiValueSource.TrustedNeutral, StringComparison.Ordinal))
+        {
+            FlushPendingNeutralMeasurements(setLabel, state);
+        }
+
+        PublishMeasurementCore(
+            setLabel,
+            result,
+            qualityWeight,
+            state,
+            valueSource,
+            state.ReferenceEpoch > 0 ? state.ReferenceEpoch : null,
+            state.ActiveReferenceLockKind);
+    }
+
+    private void PublishMeasurementCore(
+        string setLabel,
+        RealtimeReconstructionResult result,
+        double qualityWeight,
+        RealtimeRunState state,
+        string valueSource,
+        int? referenceEpoch,
+        string referenceLockKind)
+    {
         callbacks.PublishReadiness(setLabel, "ROI 就绪：是 · 当前参考 epoch 正常发布");
         var roi = RoiVisualizationEngine.CaptureSelection(workspace);
         FixedRoiTemporalSample? fixedSample = null;
@@ -83,16 +107,16 @@ internal sealed class RealtimeRoiController
                 result.CompletedAt,
                 qualityWeight,
                 measurements,
-                state.ReferenceEpoch > 0 ? state.ReferenceEpoch : null,
-                state.ActiveReferenceLockKind);
+                referenceEpoch,
+                referenceLockKind);
             point = RoiVisualizationEngine.CreateRoiCurvePointFromMeasurement(
                 setLabel,
                 0,
                 result.BlockNumber,
                 result.CompletedAt,
                 qualityWeight,
-                state.ReferenceEpoch > 0 ? state.ReferenceEpoch : null,
-                state.ActiveReferenceLockKind,
+                referenceEpoch,
+                referenceLockKind,
                 measurements[fixedCellIndex],
                 roi,
                 valueSource);
@@ -105,8 +129,8 @@ internal sealed class RealtimeRoiController
                 result.BlockNumber,
                 result.CompletedAt,
                 qualityWeight,
-                state.ReferenceEpoch > 0 ? state.ReferenceEpoch : null,
-                state.ActiveReferenceLockKind,
+                referenceEpoch,
+                referenceLockKind,
                 result.Conductivity,
                 result.NodeCoords,
                 result.CellConnectivity,
@@ -251,26 +275,92 @@ internal sealed class RealtimeRoiController
         RealtimeDemodulatedBlock block,
         RealtimeRunState state)
     {
+        callbacks.PersistTrustedNeutralEvidence(block, state);
+
+        var sample = new RealtimeNeutralRoiSample(
+            block.BlockNumber,
+            block.QualityWeight,
+            DateTimeOffset.UtcNow,
+            state.ReferenceEpoch > 0 ? state.ReferenceEpoch : null,
+            state.ActiveReferenceLockKind);
+        var geometry = state.RoiGeometry;
+        if (geometry is null || geometry.CellConnectivity.GetLength(0) == 0)
+        {
+            lock (state.PendingNeutralRoiGate)
+            {
+                state.PendingNeutralRoiSamples.Add(sample);
+                while (state.PendingNeutralRoiSamples.Count > SeriesLimit)
+                {
+                    state.PendingNeutralRoiSamples.RemoveAt(0);
+                }
+            }
+
+            return;
+        }
+
+        FlushPendingNeutralMeasurements(setLabel, state);
+        PublishNeutralMeasurement(setLabel, sample, state, geometry);
+    }
+
+    private void FlushPendingNeutralMeasurements(string setLabel, RealtimeRunState state)
+    {
         var geometry = state.RoiGeometry;
         if (geometry is null || geometry.CellConnectivity.GetLength(0) == 0)
         {
             return;
         }
 
-        callbacks.PersistTrustedNeutralEvidence(block, state);
+        RealtimeNeutralRoiSample[] pending;
+        lock (state.PendingNeutralRoiGate)
+        {
+            if (state.PendingNeutralRoiSamples.Count == 0)
+            {
+                return;
+            }
+
+            pending = [.. state.PendingNeutralRoiSamples];
+            state.PendingNeutralRoiSamples.Clear();
+        }
+
+        foreach (var sample in pending)
+        {
+            PublishNeutralMeasurement(setLabel, sample, state, geometry);
+        }
+    }
+
+    private void PublishNeutralMeasurement(
+        string setLabel,
+        RealtimeNeutralRoiSample sample,
+        RealtimeRunState state,
+        RealtimeRoiGeometry geometry)
+    {
+        var valueCount = string.Equals(
+            geometry.MeshIndexMetadata.ParameterEntity,
+            ReconstructionParameterEntity.Node,
+            StringComparison.Ordinal)
+                ? geometry.NodeCoords.GetLength(0)
+                : geometry.CellConnectivity.GetLength(0);
 
         var neutral = new RealtimeReconstructionResult(
-            block.BlockNumber,
+            sample.BlockNumber,
             string.Empty,
-            Enumerable.Repeat(1.0, geometry.CellConnectivity.GetLength(0)).ToArray(),
+            Enumerable.Repeat(1.0, valueCount).ToArray(),
             geometry.NodeCoords,
             geometry.CellConnectivity,
-            DateTimeOffset.UtcNow,
+            sample.ObservedAt,
             TimeSpan.Zero,
             OutputPersisted: false,
             ReconstructionScaleStatus: ReconstructionScale.ModelRelative,
-            ReconstructionScaleProvenance: ReconstructionScale.NormalizedModelProvenance);
-        PublishMeasurement(setLabel, neutral, block.QualityWeight, state, RoiValueSource.TrustedNeutral);
+            ReconstructionScaleProvenance: ReconstructionScale.NormalizedModelProvenance,
+            MeshIndexMetadata: geometry.MeshIndexMetadata);
+        PublishMeasurementCore(
+            setLabel,
+            neutral,
+            sample.QualityWeight,
+            state,
+            RoiValueSource.TrustedNeutral,
+            sample.ReferenceEpoch,
+            sample.ReferenceLockKind);
     }
 
     private void QueueFixedTemporalVisualRebuild(

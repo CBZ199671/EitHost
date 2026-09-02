@@ -1026,6 +1026,8 @@ internal static partial class EnglishUiText
                 ("内存缓存已清空", "Memory cache cleared"),
                 ("内存缓存已丢弃", "Memory cache discarded"),
                 ("内存水位触发自动保存", "The memory watermark triggered an automatic save"),
+                ("停止请求已发送；读取或自动落盘任务仍在退出，正在后台安全清理，完成前不可重新启动", "Stop requested; read or auto-save work is still exiting and is being cleaned up safely in the background. Restart is blocked until cleanup completes"),
+                ("采集停止清理超时；读取或自动落盘资源仍在后台安全清理", "Acquisition stop cleanup timed out; read or auto-save resources are still being cleaned up safely in the background"),
                 ("内存采集", "memory acquisition"),
                 ("已自动保存", "saved automatically"),
                 ("未采集到有效数据", "No valid data was acquired"),
