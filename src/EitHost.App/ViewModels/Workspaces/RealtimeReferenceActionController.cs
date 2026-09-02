@@ -17,6 +17,7 @@ internal sealed record RealtimeReferenceActionCallbacks(
 internal sealed class RealtimeReferenceActionController
 {
     private const int MinimumReferenceFrames = 100;
+    private const int ReplacementReferenceFrames = 300;
     private readonly RealtimeWorkspaceViewModel workspace;
     private readonly RealtimeSessionController sessions;
     private readonly object synchronizedActionGate;
@@ -59,8 +60,14 @@ internal sealed class RealtimeReferenceActionController
             if (state.AutomaticReferenceWindow is { } automaticWindow)
             {
                 return state.ReplacementReferenceCollecting
-                    ? $"用点击前 {automaticWindow.FrameCount} 帧准备新参考"
+                    ? $"用重锁后新采集 {automaticWindow.FrameCount} 帧准备新参考"
                     : $"用点击前 {automaticWindow.FrameCount} 帧建立正式参考并开始 ROI";
+            }
+
+            if (state.ReplacementReferenceCollecting && state.ReferenceVoltage208 is not null)
+            {
+                var replacementCount = Volatile.Read(ref state.ReplacementReferenceCandidateCount);
+                return $"准备重锁新参考 {Math.Min(replacementCount, ReplacementReferenceFrames)}/{ReplacementReferenceFrames}";
             }
 
             var count = Volatile.Read(ref state.ReferenceCandidateContinuousCount);
@@ -108,16 +115,40 @@ internal sealed class RealtimeReferenceActionController
         }
 
         workspace.ReferenceRelockStateText = CreateRelockStateText(state);
+        var preparingReplacement = state.ReplacementReferenceCollecting &&
+            state.ReferenceVoltage208 is not null &&
+            state.ReplacementReferenceSynchronizedSetCount <= 1;
+        var requiredFrameCount = preparingReplacement
+            ? ReplacementReferenceFrames
+            : MinimumReferenceFrames;
+        var minimumSequenceExclusive = preparingReplacement
+            ? state.ReplacementReferenceStartSequence
+            : null;
+        var cutoff = DateTimeOffset.Now;
         EcdCwrReferenceWindow? automaticWindow;
         IReadOnlyList<EcdCwrReferenceWindow> windows;
+        int candidateCount;
         lock (state.ReferenceCandidateGate)
         {
             automaticWindow = state.ReferenceCandidateHistory.BuildAutomaticWindow(
-                DateTimeOffset.Now,
-                MinimumReferenceFrames);
+                cutoff,
+                requiredFrameCount,
+                minimumSequenceExclusive: minimumSequenceExclusive,
+                maximumFrameCount: preparingReplacement ? ReplacementReferenceFrames : null);
             windows = state.ReferenceCandidateHistory.BuildRepresentativeWindows(
-                MinimumReferenceFrames);
+                requiredFrameCount,
+                minimumSequenceExclusive: minimumSequenceExclusive);
+            candidateCount = preparingReplacement
+                ? state.ReferenceCandidateHistory.CountLatestContiguousCandidates(
+                    cutoff,
+                    minimumSequenceExclusive)
+                : Volatile.Read(ref state.ReferenceCandidateContinuousCount);
             state.AutomaticReferenceWindow = automaticWindow;
+        }
+
+        if (preparingReplacement)
+        {
+            Volatile.Write(ref state.ReplacementReferenceCandidateCount, candidateCount);
         }
 
         var selectedId = state.SelectedReferenceWindow?.WindowId;
@@ -132,14 +163,15 @@ internal sealed class RealtimeReferenceActionController
             ?? workspace.ReferenceWindowOptions.LastOrDefault();
         if (automaticWindow is null)
         {
-            var count = Volatile.Read(ref state.ReferenceCandidateContinuousCount);
-            workspace.ReferenceWindowPreview =
-                $"自动参考准备中：最近同工况连续质量合格帧 {Math.Min(count, MinimumReferenceFrames)}/{MinimumReferenceFrames}；满 100 帧即可点击，无需等待稳定阈值。";
+            workspace.ReferenceWindowPreview = preparingReplacement
+                ? $"重锁新参考采集中：只计入点击“准备重锁”后新采集的同工况连续严格全绿帧 {Math.Min(candidateCount, ReplacementReferenceFrames)}/{ReplacementReferenceFrames}；满 300 帧后才可准备切换。"
+                : $"自动参考准备中：最近同工况连续质量合格帧 {Math.Min(candidateCount, MinimumReferenceFrames)}/{MinimumReferenceFrames}；满 100 帧即可点击，无需等待稳定阈值。";
         }
         else
         {
-            workspace.ReferenceWindowPreview =
-                $"自动参考就绪：点击时将冻结截止时刻，综合 {automaticWindow.StartedAt.ToLocalTime():HH:mm:ss}–{automaticWindow.EndedAt.ToLocalTime():HH:mm:ss} 的全部 {automaticWindow.FrameCount} 个同工况连续高质量帧；稳健统计自动剔除离群帧。";
+            workspace.ReferenceWindowPreview = preparingReplacement
+                ? $"重锁新参考就绪：将使用准备重锁后最新 {automaticWindow.FrameCount} 个同工况连续严格全绿帧（{automaticWindow.StartedAt.ToLocalTime():HH:mm:ss}–{automaticWindow.EndedAt.ToLocalTime():HH:mm:ss}）；稳健统计自动剔除离群帧。"
+                : $"自动参考就绪：点击时将冻结截止时刻，综合 {automaticWindow.StartedAt.ToLocalTime():HH:mm:ss}–{automaticWindow.EndedAt.ToLocalTime():HH:mm:ss} 的全部 {automaticWindow.FrameCount} 个同工况连续高质量帧；稳健统计自动剔除离群帧。";
         }
 
         callbacks.RefreshWindowPresentation();
@@ -214,13 +246,20 @@ internal sealed class RealtimeReferenceActionController
             return;
         }
 
-        state.BeginReplacementPreparation(DateTimeOffset.Now);
+        var requestedAt = DateTimeOffset.Now;
+        lock (state.ReferenceCandidateGate)
+        {
+            state.BeginReplacementPreparation(requestedAt, state.ReferenceCandidateNextSequence);
+            state.AutomaticReferenceWindow = null;
+            state.SelectedReferenceWindow = null;
+        }
+
         RefreshWindowOptions(label);
         workspace.ReferenceRelockStateText =
-            $"重锁：后台准备中；当前 e{state.ReferenceEpoch} 持续正常成像与 ROI。主按钮自动综合点击前全部合格数据；高级区间可选。";
+            $"重锁：后台重新采集中 0/{ReplacementReferenceFrames}；当前 e{state.ReferenceEpoch} 持续正常成像与 ROI。只使用本次准备重锁后新采集的最近 300 个连续严格全绿帧。";
         callbacks.PublishReferenceSummary(
             label,
-            $"重锁准备中：当前参考 e{state.ReferenceEpoch} 保持激活，成像、接触诊断与 ROI 不停；点击主按钮将自动综合操作前最近同工况连续段的全部高质量帧，再确认切换或取消。");
+            $"重锁准备中：当前参考 e{state.ReferenceEpoch} 保持激活，成像、接触诊断与 ROI 不停；重新采集满 300 个同工况连续严格全绿帧后，主按钮才可准备新参考，再确认切换或取消。");
         callbacks.PublishStatus($"{label} 已开始后台重锁准备；旧参考 e{state.ReferenceEpoch} 未清除。");
         QueueLog($"{DateTime.Now:HH:mm:ss} {label} replacement reference collection started activeEpoch={state.ReferenceEpoch}");
         callbacks.RefreshPresentation();
@@ -580,6 +619,19 @@ internal sealed class RealtimeReferenceActionController
             return;
         }
 
+        var minimumSequenceExclusive = preparingReplacement
+            ? state.ReplacementReferenceStartSequence
+            : null;
+        if (preparingReplacement && !minimumSequenceExclusive.HasValue)
+        {
+            callbacks.PublishStatus($"{label} 重锁采集水位不可用；请取消后重新点击“准备重锁”。");
+            return;
+        }
+
+        var requiredFrameCount = preparingReplacement
+            ? ReplacementReferenceFrames
+            : MinimumReferenceFrames;
+
         var actionAt = DateTimeOffset.Now;
         EcdCwrReferenceWindow? selectedWindow;
         if (useSelectedWindow)
@@ -597,17 +649,21 @@ internal sealed class RealtimeReferenceActionController
             {
                 selectedWindow = state.ReferenceCandidateHistory.BuildAutomaticWindow(
                     actionAt,
-                    MinimumReferenceFrames);
+                    requiredFrameCount,
+                    minimumSequenceExclusive: minimumSequenceExclusive,
+                    maximumFrameCount: preparingReplacement ? ReplacementReferenceFrames : null);
                 state.AutomaticReferenceWindow = selectedWindow;
             }
         }
 
         if (selectedWindow is null)
         {
-            var count = Volatile.Read(ref state.ReferenceCandidateContinuousCount);
+            var count = preparingReplacement
+                ? Volatile.Read(ref state.ReplacementReferenceCandidateCount)
+                : Volatile.Read(ref state.ReferenceCandidateContinuousCount);
             callbacks.PublishStatus(useSelectedWindow
-                ? $"{label} 尚未选择完整的历史参考区间。"
-                : $"{label} 最近同工况连续高质量参考候选不足：{count}/{MinimumReferenceFrames}。");
+                ? $"{label} 尚未选择完整的本次重锁参考区间。"
+                : $"{label} 最近同工况连续高质量参考候选不足：{count}/{requiredFrameCount}。");
             return;
         }
 
@@ -616,6 +672,16 @@ internal sealed class RealtimeReferenceActionController
         {
             lock (state.ReferenceCandidateGate)
             {
+                if (preparingReplacement &&
+                    (selectedWindow.FrameCount != ReplacementReferenceFrames ||
+                     !state.ReferenceCandidateHistory.IsWindowAfterSequence(
+                         selectedWindow,
+                         minimumSequenceExclusive!.Value)))
+                {
+                    throw new InvalidOperationException(
+                        "重锁参考必须全部来自本次准备重锁后新采集的最近 300 个连续严格全绿帧。");
+                }
+
                 observations = state.ReferenceCandidateHistory.ResolveObservations(selectedWindow);
                 state.PendingSelectedReferenceFrames = selectedWindow.SourceCandidateIds
                     .Where(state.ReferenceCandidateFrameBySourceId.ContainsKey)
@@ -681,12 +747,12 @@ internal sealed class RealtimeReferenceActionController
                 $"重锁：新参考已准备（输入 {selectedWindow.FrameCount}，稳健保留 {preparedReference.FrameCount}，剔除 {preparedReference.RejectedFrameCount} 帧），旧 e{state.ReferenceEpoch} 仍在运行；请确认切换或取消。";
             callbacks.PublishReferenceSummary(
                 label,
-                $"新参考待切换：{(useSelectedWindow ? "高级所选历史区间" : "点击前自动汇总区间")} " +
+                $"新参考待切换：{(useSelectedWindow ? "高级所选本次重锁区间" : "重锁后新采集区间")} " +
                 $"{selectedWindow.StartedAt.ToLocalTime():HH:mm:ss}–{selectedWindow.EndedAt.ToLocalTime():HH:mm:ss}，" +
                 $"输入 {selectedWindow.FrameCount} 帧、稳健保留 {preparedReference.FrameCount} 帧、剔除 {preparedReference.RejectedFrameCount} 帧；" +
                 $"当前 e{state.ReferenceEpoch} 继续正常成像与 ROI。请明确确认或取消。");
             callbacks.PublishStatus($"{label} 新参考已准备，尚未切换；旧参考 e{state.ReferenceEpoch} 保持有效。");
-            QueueLog($"{DateTime.Now:HH:mm:ss} {label} replacement reference prepared mode={(useSelectedWindow ? "expert-history" : "preclick-auto")} window={selectedWindow.WindowId} input={selectedWindow.FrameCount} retained={preparedReference.FrameCount} rejected={preparedReference.RejectedFrameCount} activeEpoch={state.ReferenceEpoch}");
+            QueueLog($"{DateTime.Now:HH:mm:ss} {label} replacement reference prepared mode={(useSelectedWindow ? "expert-post-prepare" : "post-prepare-300")} window={selectedWindow.WindowId} input={selectedWindow.FrameCount} retained={preparedReference.FrameCount} rejected={preparedReference.RejectedFrameCount} activeEpoch={state.ReferenceEpoch}");
             callbacks.RefreshPresentation();
             return;
         }

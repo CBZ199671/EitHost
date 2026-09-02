@@ -157,6 +157,8 @@ public class ReferenceReconstructionCoordinator
 
     public DateTimeOffset? ReplacementReferenceRequestedAt { get; set; }
 
+    public long? ReplacementReferenceStartSequence { get; set; }
+
     public EcdCwrRobustReference? ReplacementPreparedReference { get; set; }
 
     public EcdCwrReferenceWindow? ReplacementPreparedWindow { get; set; }
@@ -174,6 +176,8 @@ public class ReferenceReconstructionCoordinator
     public int ReplacementReferenceSynchronizedSetCount { get; set; } = 1;
 
     public int ReplacementSwitchRequested;
+
+    public int ReplacementReferenceCandidateCount;
 
     public int ReferenceCandidateStrictGreenCount;
 
@@ -328,12 +332,17 @@ public class ReferenceReconstructionCoordinator
         PublishSnapshot(reason.Trim());
     }
 
-    public void BeginReplacementPreparation(DateTimeOffset requestedAt)
+    public void BeginReplacementPreparation(DateTimeOffset requestedAt) =>
+        BeginReplacementPreparation(requestedAt, ReferenceCandidateNextSequence);
+
+    public void BeginReplacementPreparation(DateTimeOffset requestedAt, long startSequence)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(startSequence);
         lock (ReplacementReferenceGate)
         {
             ReplacementReferenceCollecting = true;
             ReplacementReferenceRequestedAt = requestedAt;
+            ReplacementReferenceStartSequence = startSequence;
             ReplacementPreparedReference = null;
             ReplacementPreparedWindow = null;
             ReplacementPreparedFrames = [];
@@ -343,6 +352,7 @@ public class ReferenceReconstructionCoordinator
             ReplacementReferenceWindowSkewMilliseconds = null;
             ReplacementReferenceSynchronizedSetCount = 1;
             Interlocked.Exchange(ref ReplacementSwitchRequested, 0);
+            Volatile.Write(ref ReplacementReferenceCandidateCount, 0);
         }
 
         PublishSnapshot("replacement_preparation_started");
@@ -410,6 +420,7 @@ public class ReferenceReconstructionCoordinator
         {
             ReplacementReferenceCollecting = false;
             ReplacementReferenceRequestedAt = null;
+            ReplacementReferenceStartSequence = null;
             ReplacementPreparedReference = null;
             ReplacementPreparedWindow = null;
             ReplacementPreparedFrames = [];
@@ -421,6 +432,7 @@ public class ReferenceReconstructionCoordinator
             PendingSelectedReferenceObservations = null;
             PendingSelectedReferenceFrames = [];
             Interlocked.Exchange(ref ReplacementSwitchRequested, 0);
+            Volatile.Write(ref ReplacementReferenceCandidateCount, 0);
         }
 
         PublishSnapshot("replacement_cleared");

@@ -220,15 +220,23 @@ public sealed class EcdCwrReferenceCandidateHistory
     public EcdCwrReferenceWindow? BuildAutomaticWindow(
         DateTimeOffset cutoff,
         int requiredFrameCount,
-        IReadOnlyList<EcdCwrReferenceCandidate>? persistedCandidates = null)
+        IReadOnlyList<EcdCwrReferenceCandidate>? persistedCandidates = null,
+        long? minimumSequenceExclusive = null,
+        int? maximumFrameCount = null)
     {
         if (requiredFrameCount <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(requiredFrameCount));
         }
 
+        if (maximumFrameCount is <= 0 || maximumFrameCount < requiredFrameCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumFrameCount));
+        }
+
         var eligible = Merge(persistedCandidates)
-            .Where(candidate => candidate.CapturedAt <= cutoff)
+            .Where(candidate => candidate.CapturedAt <= cutoff &&
+                (!minimumSequenceExclusive.HasValue || candidate.Sequence > minimumSequenceExclusive.Value))
             .ToArray();
         if (eligible.Length == 0)
         {
@@ -249,13 +257,20 @@ public sealed class EcdCwrReferenceCandidateHistory
         }
 
         var memoryIds = memory.Select(candidate => candidate.SourceId).ToHashSet(StringComparer.Ordinal);
-        return CreateWindow(eligible[segmentStart..], memoryIds);
+        var selected = eligible[segmentStart..];
+        if (maximumFrameCount is { } maximum && selected.Length > maximum)
+        {
+            selected = selected[^maximum..];
+        }
+
+        return CreateWindow(selected, memoryIds);
     }
 
     public IReadOnlyList<EcdCwrReferenceWindow> BuildRepresentativeWindows(
         int requiredFrameCount,
         IReadOnlyList<EcdCwrReferenceCandidate>? persistedCandidates = null,
-        int maximumWindowCount = 8)
+        int maximumWindowCount = 8,
+        long? minimumSequenceExclusive = null)
     {
         if (requiredFrameCount <= 0)
         {
@@ -267,7 +282,10 @@ public sealed class EcdCwrReferenceCandidateHistory
             throw new ArgumentOutOfRangeException(nameof(maximumWindowCount));
         }
 
-        var merged = Merge(persistedCandidates);
+        var merged = Merge(persistedCandidates)
+            .Where(candidate =>
+                !minimumSequenceExclusive.HasValue || candidate.Sequence > minimumSequenceExclusive.Value)
+            .ToArray();
         var memoryIds = memory.Select(candidate => candidate.SourceId).ToHashSet(StringComparer.Ordinal);
         var windows = new List<EcdCwrReferenceWindow>();
         var segmentStart = 0;
@@ -313,6 +331,41 @@ public sealed class EcdCwrReferenceCandidateHistory
         }
 
         return sampled;
+    }
+
+    public int CountLatestContiguousCandidates(
+        DateTimeOffset cutoff,
+        long? minimumSequenceExclusive = null)
+    {
+        var eligible = memory
+            .Where(candidate => candidate.CapturedAt <= cutoff &&
+                (!minimumSequenceExclusive.HasValue || candidate.Sequence > minimumSequenceExclusive.Value))
+            .ToArray();
+        if (eligible.Length == 0)
+        {
+            return 0;
+        }
+
+        var segmentStart = eligible.Length - 1;
+        while (segmentStart > 0 &&
+            !IsBoundary(eligible[segmentStart - 1], eligible[segmentStart]))
+        {
+            segmentStart--;
+        }
+
+        return eligible.Length - segmentStart;
+    }
+
+    public bool IsWindowAfterSequence(
+        EcdCwrReferenceWindow window,
+        long minimumSequenceExclusive)
+    {
+        ArgumentNullException.ThrowIfNull(window);
+        var byId = memory.ToDictionary(candidate => candidate.SourceId, StringComparer.Ordinal);
+        return window.SourceCandidateIds.Count > 0 &&
+            window.SourceCandidateIds.All(sourceId =>
+                byId.TryGetValue(sourceId, out var candidate) &&
+                candidate.Sequence > minimumSequenceExclusive);
     }
 
     public IReadOnlyList<EcdCwrRobustReferenceObservation> ResolveObservations(

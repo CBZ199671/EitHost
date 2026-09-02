@@ -2246,7 +2246,7 @@
                                     </WrapPanel>
                                     <TextBlock Text="手动开始成像与 ROI" Style="{StaticResource GuideSectionTitle}"
                                                Margin="0,10,0,3" />
-                                    <TextBlock Text="主按钮会自动冻结点击时刻，综合点击前当前同一工况连续段的全部质量合格帧；100 帧只是最低门槛。无需等待对象静止或通过稳定阈值，稳健统计会剔除离群帧，随后按正常置信度成像并统计 ROI。"
+                                    <TextBlock Text="首次建参考时，主按钮综合点击前当前同一工况连续段的全部质量合格帧，100 帧为最低门槛，无需等待对象静止或通过稳定阈值；点击“准备重锁”后则重新计数，只使用随后新采集的最近 300 个连续严格全绿帧。稳健统计会剔除离群帧。"
                                                Style="{StaticResource HintText}" FontSize="10"
                                                Margin="0,0,0,5" TextWrapping="Wrap" />
                                     <TextBlock Text="{Binding RealtimeReferenceWindowPreview}"
@@ -2255,30 +2255,30 @@
                                     <Button x:Name="RealtimeUseHighQualityReferenceButton"
                                             Content="{Binding RealtimeManualReferenceActionText}"
                                             ContentTemplate="{StaticResource WrappedButtonLabel}"
-                                            ToolTip="按钮始终可见；点击后自动汇总操作前最近同工况连续段的全部高质量帧。100 帧只是最低门槛，无需等待稳定阈值。"
+                                            ToolTip="首次建参考使用点击前最近连续高质量帧；准备重锁后只使用新采集的最近 300 个连续严格全绿帧。"
                                             Command="{Binding UseCurrentRealtimeReferenceCommand}"
                                             Style="{StaticResource PrimaryButton}"
                                             MinHeight="34" Margin="0,8,0,0" Padding="6,5" />
                                     <Expander x:Name="RealtimeReferenceHistoryExpander"
-                                              Header="高级：选择历史参考区间"
+                                              Header="高级：选择参考区间"
                                               HeaderTemplate="{StaticResource WrappedHeaderLabel}"
                                               IsExpanded="False"
                                               Visibility="{Binding RealtimeReferenceWindowSelectorVisibility}"
                                               Margin="0,7,0,0">
                                         <StackPanel Margin="4,4,0,0">
-                                            <TextBlock Text="仅在需要复现实验时使用。这里最多显示 8 个不重叠代表区间；主按钮始终使用点击前自动汇总结果。"
+                                            <TextBlock Text="这里最多显示 8 个不重叠代表区间；重锁期间只显示本次准备重锁后新采集且满足数量要求的区间。"
                                                        Style="{StaticResource HintText}" FontSize="10"
                                                        Margin="0,0,0,3" TextWrapping="Wrap" />
                                             <ComboBox x:Name="RealtimeReferenceWindowSelector"
                                                       ItemsSource="{Binding RealtimeReferenceWindowOptions}"
                                                       SelectedItem="{Binding SelectedRealtimeReferenceWindow}"
                                                       Height="28" Padding="5,0"
-                                                      ToolTip="高级历史复现：选择固定 100 帧代表区间，不影响主按钮的自动汇总逻辑。" />
+                                                      ToolTip="高级区间：首次建参考为固定 100 帧；重锁时为本次新采集的固定 300 帧。" />
                                             <TextBlock Text="{Binding SelectedRealtimeReferenceWindow.Preview}"
                                                        Style="{StaticResource HintText}" FontSize="10"
                                                        Margin="0,4,0,0" TextWrapping="Wrap" />
                                             <Button x:Name="RealtimeUseSelectedReferenceWindowButton"
-                                                    Content="使用所选历史区间（高级）"
+                                                    Content="使用所选区间（高级）"
                                                     ContentTemplate="{StaticResource WrappedButtonLabel}"
                                                     Command="{Binding UseSelectedRealtimeReferenceCommand}"
                                                     MinHeight="30" Margin="0,6,0,0" Padding="6,5" />
@@ -2358,7 +2358,7 @@
                                                TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                                     <WrapPanel Margin="0,6,0,0">
                                         <Button x:Name="RealtimeRelockReferenceButton"
-                                                Content="准备重锁" ToolTip="后台准备替换参考；当前参考、成像和 ROI 不会中断"
+                                                Content="准备重锁" ToolTip="开始重新采集 300 个连续严格全绿帧；当前参考、成像和 ROI 不会中断"
                                                 Command="{Binding ResetRealtimeReferenceCommand}"
                                                 Width="72" Height="26" FontSize="12" Padding="4,0" Margin="0,0,4,0" />
                                         <Button x:Name="RealtimeExportDeviceCalibrationButton"
