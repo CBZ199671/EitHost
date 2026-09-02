@@ -543,9 +543,21 @@ internal sealed class ReplayVisualizationController : IDisposable
                 $"{detail.SetLabel} · {detail.StartedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss} ~ {ended} · {detail.ReconstructionRoute}{laneSummary} · 重构帧 {frames.Count}{neutralEvidenceSummary}";
             if (frames.Count == 0)
             {
-                workspace.ReplayFrameSummary = "该记录没有已保存解调块。";
-                workspace.ReplayContactSummary = "接触诊断：该记录没有已保存解调块。";
-                workspace.ReplayLoadStatus = "回放状态：记录中没有可回放帧";
+                if (replayTrustedNeutralEvidence.Count > 0)
+                {
+                    workspace.ReplayFrameSummary =
+                        "该实时修订没有 UI 提交的逆重构帧；可使用可信基准证据计算 ROI。";
+                    workspace.ReplayContactSummary =
+                        "接触诊断：可信基准证据不包含可回放图像帧。";
+                    workspace.ReplayLoadStatus = "回放状态：已加载可信基准证据 · 无图像帧";
+                }
+                else
+                {
+                    workspace.ReplayFrameSummary = "该记录没有已保存解调块。";
+                    workspace.ReplayContactSummary = "接触诊断：该记录没有已保存解调块。";
+                    workspace.ReplayLoadStatus = "回放状态：记录中没有可回放帧";
+                }
+
                 return;
             }
 
@@ -902,7 +914,9 @@ internal sealed class ReplayVisualizationController : IDisposable
     {
         var detail = replayRunDetail;
         var frames = replayFrames.ToArray();
-        if (detail?.NodeCoords is null || detail.CellConnectivity is null || frames.Length == 0)
+        if (detail?.NodeCoords is null ||
+            detail.CellConnectivity is null ||
+            (frames.Length == 0 && replayTrustedNeutralEvidence.Count == 0))
         {
             workspace.ReplayRoiSummary = "ROI：当前成像记录缺少网格或帧。";
             return;
@@ -970,7 +984,7 @@ internal sealed class ReplayVisualizationController : IDisposable
             RebuildTemporalView();
             workspace.ReplayRoiSummary = RoiVisualizationEngine.FormatRoiSeriesSummary("离线 ROI", calculation.Series);
             ReplayDataChanged?.Invoke();
-            StatusMessage = $"ROI 离线计算完成：{calculation.Series.Count} 帧。";
+            StatusMessage = $"ROI 离线计算完成：{calculation.Series.Count} 点。";
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
@@ -1003,7 +1017,7 @@ internal sealed class ReplayVisualizationController : IDisposable
     {
         return replayRunDetail?.NodeCoords is not null
             && replayRunDetail.CellConnectivity is not null
-            && replayFrames.Count > 0;
+            && (replayFrames.Count > 0 || replayTrustedNeutralEvidence.Count > 0);
     }
 
     private ReplayRoiCalculationResult CalculateReplayRoiSeries(
@@ -1052,10 +1066,17 @@ internal sealed class ReplayVisualizationController : IDisposable
                 cancellationToken).FramesByBlock;
         }
 
+        var parameterEntity = detail.ReconstructionParameterEntity;
         var neutralConductivity = Array.Empty<double>();
         if (trustedNeutralEvidence.Length > 0)
         {
-            var parameterEntity = ReconstructionParameterEntity.Normalize(detail.ReconstructionParameterEntity);
+            parameterEntity = ReconstructionMeshIndexMetadata.FromPersisted(
+                detail.MeshIndexSchema,
+                detail.ReconstructionParameterEntity,
+                detail.LogicalMeshFingerprint,
+                detail.OrderedIndexFingerprint,
+                detail.MeshCoordinateDecimals,
+                detail.MeshCoordinateQuantizationStep).ParameterEntity;
             neutralConductivity = Enumerable.Repeat(
                 1.0,
                 parameterEntity == ReconstructionParameterEntity.Node
@@ -1145,7 +1166,7 @@ internal sealed class ReplayVisualizationController : IDisposable
                         detail.CellConnectivity!,
                         conductivity,
                         paddingFraction,
-                        detail.ReconstructionParameterEntity);
+                        parameterEntity);
                 if (evidence is not null)
                 {
                     neutralFixedMeasurements ??= measurements;
@@ -1185,7 +1206,7 @@ internal sealed class ReplayVisualizationController : IDisposable
                     detail.NodeCoords!,
                     detail.CellConnectivity!,
                     roi,
-                    detail.ReconstructionParameterEntity);
+                    parameterEntity);
                 if (point is not null && evidence is not null)
                 {
                     point = point with { ValueSource = valueSource };

@@ -691,7 +691,6 @@ public sealed class ElectrodeContactMonitor
 
         var referenceInvalidated = UpdateReferenceInvalidationEvidence(
             states,
-            evidenceKinds,
             directElectrodeAScores);
 
         var weights = BuildMeasurementWeights(states, ewmaScores, evidenceKinds, faultTypes);
@@ -2035,7 +2034,6 @@ public sealed class ElectrodeContactMonitor
 
     private bool UpdateReferenceInvalidationEvidence(
         IReadOnlyList<ElectrodeContactState> states,
-        IReadOnlyList<ElectrodeEvidenceKind> evidenceKinds,
         IReadOnlyList<double> directElectrodeAScores)
     {
         var referenceInvalidated = false;
@@ -2050,10 +2048,7 @@ public sealed class ElectrodeContactMonitor
                 criticalDirectAPeak[electrode] = Math.Max(
                     criticalDirectAPeak[electrode],
                     directElectrodeAScores[electrode]);
-                var hardSaturation =
-                    (evidenceKinds[electrode] & ElectrodeEvidenceKind.Saturation) != 0;
-                if (hardSaturation ||
-                    referenceInvalidationCriticalFrames[electrode] >=
+                if (referenceInvalidationCriticalFrames[electrode] >=
                     options.ReferenceInvalidationCriticalConfirmationFrames)
                 {
                     criticalSinceReference[electrode] = true;
@@ -2181,6 +2176,7 @@ public sealed class ElectrodeContactMonitor
         double[]? directEvidenceAScores = null,
         EcdCwrMultiFaultDirectAConsensusResult? multiFaultConsensus = null)
     {
+        InterruptConsecutiveConfirmationsForSystemLevel();
         var states = Enumerable.Repeat(ElectrodeContactState.SystemLevel, ElectrodeCount).ToArray();
         var faultTypes = Enumerable.Repeat(ElectrodeFaultType.SystemLevel, ElectrodeCount).ToArray();
         var confidence = Enumerable.Repeat(1.0, ElectrodeCount).ToArray();
@@ -2227,6 +2223,7 @@ public sealed class ElectrodeContactMonitor
         EcdCwrFaultDictionaryTrace? faultDictionaryTrace,
         string reason)
     {
+        UpdateDirectARecoveryFrames(directEvidenceAScores, candidateEvidenceKinds);
         var states = Enumerable.Repeat(ElectrodeContactState.Green, ElectrodeCount).ToArray();
         var faultTypes = Enumerable.Repeat(ElectrodeFaultType.None, ElectrodeCount).ToArray();
         var scores = new double[ElectrodeCount];
@@ -2241,19 +2238,6 @@ public sealed class ElectrodeContactMonitor
 
             if (multiFaultConsensus.Confirmed[electrode])
             {
-                referenceInvalidationGreenFrames[electrode] = 0;
-                referenceInvalidationCriticalFrames[electrode] = Math.Min(
-                    options.ReferenceInvalidationCriticalConfirmationFrames,
-                    referenceInvalidationCriticalFrames[electrode] + 1);
-                criticalDirectAPeak[electrode] = Math.Max(
-                    criticalDirectAPeak[electrode],
-                    directEvidenceAScores[electrode]);
-                if (referenceInvalidationCriticalFrames[electrode] >=
-                    options.ReferenceInvalidationCriticalConfirmationFrames)
-                {
-                    criticalSinceReference[electrode] = true;
-                }
-
                 states[electrode] = ElectrodeContactState.Red;
                 faultTypes[electrode] = ElectrodeFaultType.ElectrodeContact;
                 scores[electrode] = Math.Max(options.SevereZThreshold, directEvidenceAScores[electrode]);
@@ -2262,13 +2246,6 @@ public sealed class ElectrodeContactMonitor
             }
             else if (multiFaultConsensus.Candidates[electrode])
             {
-                referenceInvalidationCriticalFrames[electrode] = 0;
-                referenceInvalidationGreenFrames[electrode] = 0;
-                if (!criticalSinceReference[electrode])
-                {
-                    criticalDirectAPeak[electrode] = 0.0;
-                }
-
                 states[electrode] = ElectrodeContactState.Yellow;
                 faultTypes[electrode] = ElectrodeFaultType.UncertainStructured;
                 scores[electrode] = Math.Max(options.YellowThreshold, directEvidenceAScores[electrode]);
@@ -2276,6 +2253,21 @@ public sealed class ElectrodeContactMonitor
                 reasons[electrode] = "A sparse-limit candidate under system alarm";
             }
         }
+
+        for (var electrode = 0; electrode < ElectrodeCount; electrode++)
+        {
+            ApplyLocalizedDirectARecoveryState(
+                electrode,
+                states,
+                faultTypes,
+                scores,
+                confidence,
+                reasons);
+        }
+
+        var referenceInvalidated = UpdateReferenceInvalidationEvidence(
+            states,
+            directEvidenceAScores);
 
         var candidateCount = multiFaultConsensus.Candidates.Count(selected => selected);
         var confirmedCount = multiFaultConsensus.Confirmed.Count(selected => selected);
@@ -2291,7 +2283,7 @@ public sealed class ElectrodeContactMonitor
             CreateWeightPolicyVersion(),
             $"系统级最高警报：{candidateCount}/{ElectrodeCount} 电极严重异常，已确认 {confirmedCount}/{candidateCount}；停止可信重构",
             SystemLevel: true,
-            ReferenceInvalidated: false,
+            ReferenceInvalidated: referenceInvalidated,
             DirectEvidenceAScores: directEvidenceAScores,
             CandidateScores: candidateScores.ToArray(),
             CandidateFaultTypes: candidateFaultTypes.ToArray(),
@@ -2302,6 +2294,62 @@ public sealed class ElectrodeContactMonitor
             FaultDictionaryTrace: faultDictionaryTrace,
             ContactSubspaceEvidence: EcdCwrContactSubspaceEvidenceSummary.NotApplicable(reason),
             MultiFaultConsensus: multiFaultConsensus);
+    }
+
+    private void InterruptConsecutiveConfirmationsForSystemLevel()
+    {
+        for (var electrode = 0; electrode < ElectrodeCount; electrode++)
+        {
+            directARecoveryFrames[electrode] = 0;
+            referenceInvalidationCriticalFrames[electrode] = 0;
+            referenceInvalidationGreenFrames[electrode] = 0;
+            if (!criticalSinceReference[electrode])
+            {
+                criticalDirectAPeak[electrode] = 0.0;
+            }
+        }
+    }
+
+    private void ApplyLocalizedDirectARecoveryState(
+        int electrode,
+        ElectrodeContactState[] states,
+        ElectrodeFaultType[] faultTypes,
+        double[] scores,
+        double[] confidence,
+        string[] reasons)
+    {
+        if (!criticalSinceReference[electrode])
+        {
+            return;
+        }
+
+        var recoveryFramesRequired = intermittentContactLatched[electrode]
+            ? Math.Max(options.RecoveryConfirmationFrames, options.IntermittentRecoveryConfirmationFrames)
+            : options.RecoveryConfirmationFrames;
+        if (directARecoveryFrames[electrode] < recoveryFramesRequired &&
+            states[electrode] != ElectrodeContactState.DarkRed)
+        {
+            states[electrode] = ElectrodeContactState.Red;
+            faultTypes[electrode] = ElectrodeFaultType.ElectrodeContact;
+            scores[electrode] = Math.Max(scores[electrode], options.RedThreshold);
+            confidence[electrode] = 1.0;
+            reasons[electrode] = "confirmed contact held pending direct-A recovery";
+            ewmaScores[electrode] = Math.Max(ewmaScores[electrode], options.RedThreshold);
+            return;
+        }
+
+        states[electrode] = ElectrodeContactState.Green;
+        faultTypes[electrode] = ElectrodeFaultType.None;
+        scores[electrode] = 0.0;
+        confidence[electrode] = 0.0;
+        reasons[electrode] = "A recovery confirmed";
+        ewmaScores[electrode] = 0.0;
+        aOnlyRedConfirmation[electrode] = 0.0;
+        dominantRedConfirmation[electrode] = 0.0;
+        dominantConfirmationHadGap[electrode] = false;
+        intermittentContactLatched[electrode] = false;
+        criticalDirectAPeak[electrode] = 0.0;
+        multiFaultDirectATracker.ResetElectrode(electrode);
     }
 
     private double[] BuildMeasurementWeights(

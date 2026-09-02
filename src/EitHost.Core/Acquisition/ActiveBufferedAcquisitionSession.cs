@@ -9,6 +9,7 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
 
     private static readonly TimeSpan StopWaitTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan StopInitialBufferWaitTimeout = TimeSpan.FromMilliseconds(300);
+    private static readonly TimeSpan DisposeDrainWaitTimeout = TimeSpan.FromMilliseconds(750);
 
     private readonly object gate = new();
     private readonly object lifecycleGate = new();
@@ -42,6 +43,7 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
     private int compressionScanIndex;
     private int activeAutoFlushCount;
     private Task? stopTask;
+    private bool stopRequested;
     private bool disposeRequested;
     private volatile bool disposed;
 
@@ -209,7 +211,7 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
             return;
         }
 
-        await Task.WhenAny(firstBufferReady.Task, Task.Delay(timeout)).ConfigureAwait(true);
+        await Task.WhenAny(firstBufferReady.Task, Task.Delay(timeout)).ConfigureAwait(false);
     }
 
     public Task<BufferedAcquisitionAutoFlushResult> WaitForFirstAutoFlushAsync(TimeSpan timeout) =>
@@ -307,7 +309,7 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
     {
         try
         {
-            await StopCoreAsync().ConfigureAwait(true);
+            await StopCoreAsync().ConfigureAwait(false);
         }
         finally
         {
@@ -333,7 +335,12 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
 
         if (!HasBufferedValues() && ReaderFailure is null)
         {
-            await WaitForBufferedDataAsync(StopInitialBufferWaitTimeout).ConfigureAwait(true);
+            await WaitForBufferedDataAsync(StopInitialBufferWaitTimeout).ConfigureAwait(false);
+        }
+
+        lock (gate)
+        {
+            stopRequested = true;
         }
 
         cancellation.Cancel();
@@ -346,13 +353,15 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
             StopFailure = ex;
         }
 
-        var completed = await Task.WhenAny(readerTask, Task.Delay(StopWaitTimeout)).ConfigureAwait(true);
+        var completed = await Task.WhenAny(readerTask, Task.Delay(StopWaitTimeout)).ConfigureAwait(false);
         if (completed != readerTask)
         {
             ReaderFailure ??= new TimeoutException("USB2070 后台读取线程停止超时。");
         }
 
-        await WaitForAutoFlushesAsync().ConfigureAwait(true);
+        await readerTask.ConfigureAwait(false);
+        await WaitForAutoFlushesAsync().ConfigureAwait(false);
+        await WaitForCompressionAsync().ConfigureAwait(false);
 
         if (ReaderFailure is not null && BufferedValueCount == 0 && AutoFlushResults.Count == 0)
         {
@@ -367,6 +376,8 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
 
     public void Dispose()
     {
+        Task pendingStop;
+        var releaseResources = false;
         lock (lifecycleGate)
         {
             if (disposed || disposeRequested)
@@ -375,36 +386,39 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
             }
 
             disposeRequested = true;
-            if (stopTask is { IsCompleted: false })
+            stopTask ??= StopAndFinalizeAsync();
+            pendingStop = stopTask;
+            if (pendingStop.IsCompleted && !disposed)
             {
-                return;
+                disposed = true;
+                releaseResources = true;
             }
-
-            disposed = true;
         }
 
-        ReleaseResources();
+        if (releaseResources)
+        {
+            ReleaseResources();
+        }
+
+        try
+        {
+            if (!pendingStop.IsCompleted)
+            {
+                pendingStop.Wait(DisposeDrainWaitTimeout);
+            }
+            else
+            {
+                _ = pendingStop.Exception;
+            }
+        }
+        catch
+        {
+            // Dispose is best-effort; StopAsync retains the observable terminal failure.
+        }
     }
 
     private void ReleaseResources()
     {
-        cancellation.Cancel();
-        try
-        {
-            UsbSession.StopAcquisition();
-        }
-        catch
-        {
-        }
-
-        try
-        {
-            readerTask.Wait(TimeSpan.FromMilliseconds(500));
-        }
-        catch
-        {
-        }
-
         cancellation.Dispose();
         UsbSession.Dispose();
     }
@@ -451,9 +465,8 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
                 break;
             }
 
-            if (readCount > 0)
+            if (readCount > 0 && TryAppendSegment(buffer, readCount))
             {
-                AppendSegment(buffer, readCount);
                 StartAutoFlushIfNeeded();
             }
 
@@ -464,7 +477,7 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
         }
     }
 
-    private void AppendSegment(ushort[] buffer, int readCount)
+    private bool TryAppendSegment(ushort[] buffer, int readCount)
     {
         var segment = BufferedAdcSegment.FromBuffer(buffer, readCount);
         long droppedThisAppend = 0;
@@ -472,6 +485,11 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
 
         lock (gate)
         {
+            if (stopRequested || cancellation.IsCancellationRequested)
+            {
+                return false;
+            }
+
             segments.Add(segment);
             activeSegments.Add(segment);
             totalValueCount += segment.ValueCount;
@@ -504,6 +522,7 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
         }
 
         StartCompressionIfNeeded();
+        return true;
     }
 
     private void StartAutoFlushIfNeeded()
@@ -512,7 +531,7 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
         DetachedAdcSegments detached;
         lock (gate)
         {
-            if (activeAutoFlushCount >= MaxAutoFlushConcurrency)
+            if (stopRequested || activeAutoFlushCount >= MaxAutoFlushConcurrency)
             {
                 return;
             }
@@ -596,7 +615,7 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
     {
         lock (gate)
         {
-            if (disposed || compressionTask is { IsCompleted: false })
+            if (disposed || stopRequested || compressionTask is { IsCompleted: false })
             {
                 return;
             }
@@ -694,32 +713,68 @@ public sealed class ActiveBufferedAcquisitionSession<TPairing> : IDisposable
 
     private async Task WaitForAutoFlushesAsync()
     {
-        Task<BufferedAcquisitionAutoFlushResult>[] tasks;
-        lock (gate)
+        var processedTaskCount = 0;
+        while (true)
         {
-            tasks = autoFlushTasks.ToArray();
-        }
-
-        foreach (var task in tasks)
-        {
-            try
+            Task<BufferedAcquisitionAutoFlushResult>[] tasks;
+            lock (gate)
             {
-                var result = await task.ConfigureAwait(true);
-                await result.Completion.ConfigureAwait(true);
-                lock (gate)
+                tasks = autoFlushTasks.Skip(processedTaskCount).ToArray();
+                processedTaskCount = autoFlushTasks.Count;
+            }
+
+            if (tasks.Length == 0)
+            {
+                return;
+            }
+
+            foreach (var task in tasks)
+            {
+                try
                 {
-                    if (autoFlushResultPaths.Add(result.Hdf5Path))
+                    var result = await task.ConfigureAwait(false);
+                    await result.Completion.ConfigureAwait(false);
+                    lock (gate)
                     {
-                        autoFlushResults.Add(result);
+                        if (autoFlushResultPaths.Add(result.Hdf5Path))
+                        {
+                            autoFlushResults.Add(result);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    lock (gate)
+                    {
+                        autoFlushFailures.Add(ex);
                     }
                 }
             }
-            catch (Exception ex)
+        }
+    }
+
+    private async Task WaitForCompressionAsync()
+    {
+        Task? task;
+        lock (gate)
+        {
+            task = compressionTask;
+        }
+
+        if (task is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            lock (gate)
             {
-                lock (gate)
-                {
-                    autoFlushFailures.Add(ex);
-                }
+                compressionFailures.Add(ex);
             }
         }
     }

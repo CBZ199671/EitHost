@@ -17,7 +17,9 @@ internal static class AtomicFileCommitter
     [
         TimeSpan.FromMilliseconds(50),
         TimeSpan.FromMilliseconds(100),
-        TimeSpan.FromMilliseconds(200)
+        TimeSpan.FromMilliseconds(200),
+        TimeSpan.FromMilliseconds(400),
+        TimeSpan.FromMilliseconds(800)
     ];
 
     private static readonly TimeSpan[] LeaseRetryDelays =

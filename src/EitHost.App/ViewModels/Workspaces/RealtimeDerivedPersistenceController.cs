@@ -127,6 +127,16 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
                     try
                     {
                         catalog.RecordRealtimeRoiEvidence(evidence);
+                        var manifest = catalog.GetPipelineManifest(evidence.ExperimentRunId);
+                        if (manifest is not null)
+                        {
+                            EnsureLiveRevision(
+                                evidence.ExperimentRunId,
+                                evidence.RevisionId,
+                                manifest.AlgorithmFingerprint,
+                                evidence.ProcessedAt);
+                        }
+
                         completion.TrySetResult(true);
                     }
                     catch (Exception ex)
@@ -445,7 +455,34 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
                 experimentRunId,
                 ReconstructionLane.Live,
                 LiveRevisionId);
-            if (revision is null || revision.IsPublished)
+            if (revision is null)
+            {
+                var evidence = catalog.ListRealtimeRoiEvidence(experimentRunId, LiveRevisionId);
+                if (evidence.Count == 0)
+                {
+                    return;
+                }
+
+                var manifest = catalog.GetPipelineManifest(experimentRunId);
+                if (manifest is null)
+                {
+                    diagnostic(
+                        $"run {experimentRunId:D} trusted-neutral live replay excluded: pipeline manifest missing");
+                    return;
+                }
+
+                EnsureLiveRevision(
+                    experimentRunId,
+                    LiveRevisionId,
+                    manifest.AlgorithmFingerprint,
+                    evidence.Min(item => item.ProcessedAt));
+                revision = catalog.GetReconstructionRevision(
+                    experimentRunId,
+                    ReconstructionLane.Live,
+                    LiveRevisionId);
+            }
+
+            if (revision?.IsPublished != false)
             {
                 return;
             }
@@ -527,17 +564,28 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         }
     }
 
-    private void EnsureLiveRevision(RealtimePersistedLiveFrameEvidence evidence)
+    private void EnsureLiveRevision(RealtimePersistedLiveFrameEvidence evidence) =>
+        EnsureLiveRevision(
+            evidence.ExperimentRunId,
+            evidence.RevisionId,
+            evidence.AlgorithmFingerprint,
+            evidence.ProcessedAt);
+
+    private void EnsureLiveRevision(
+        Guid experimentRunId,
+        string revisionId,
+        string algorithmFingerprint,
+        DateTimeOffset createdAt)
     {
         var existing = catalog.GetReconstructionRevision(
-            evidence.ExperimentRunId,
+            experimentRunId,
             ReconstructionLane.Live,
-            evidence.RevisionId);
+            revisionId);
         if (existing is not null)
         {
             if (!string.Equals(
                     existing.AlgorithmFingerprint,
-                    evidence.AlgorithmFingerprint,
+                    algorithmFingerprint,
                     StringComparison.Ordinal))
             {
                 throw new InvalidDataException("Live reconstruction algorithm fingerprint changed within one run.");
@@ -547,11 +595,11 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         }
 
         catalog.UpsertReconstructionRevision(new ReconstructionRevisionCatalogRecord(
-            evidence.ExperimentRunId,
+            experimentRunId,
             ReconstructionLane.Live,
-            evidence.RevisionId,
+            revisionId,
             ReconstructionRevisionStatus.Staged,
-            evidence.AlgorithmFingerprint,
+            algorithmFingerprint,
             RawDenominator: 0,
             DemodDenominator: 0,
             TerminalOutcomeCount: 0,
@@ -559,8 +607,8 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
             NeutralCount: 0,
             ExcludedCount: 0,
             EstimatedIncrementalBytes: 0,
-            evidence.ProcessedAt,
-            evidence.ProcessedAt));
+            createdAt,
+            createdAt));
     }
 
     private RealtimePersistedLiveFrameEvidence? CreateLiveEvidence(
