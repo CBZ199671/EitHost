@@ -1,10 +1,13 @@
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace EitHost.Core.Reconstruction;
 
 public sealed class WslPyEidorsOneShotReconstructionBackend : IRealtimeReconstructionBackend
 {
     private const string DefaultNixExecutable = "/nix/var/nix/profiles/default/bin/nix";
+    internal const string StructuredBackendErrorPrefix = "[backend-worker] backend-error-json ";
+    private const string LegacyBackendErrorPrefix = "[backend-worker] backend error [";
 
     private readonly WslPyEidorsReconstructionOptions options;
     private readonly Hdf5ReconstructionResultReader resultReader;
@@ -38,7 +41,7 @@ public sealed class WslPyEidorsOneShotReconstructionBackend : IRealtimeReconstru
             outputPath = Path.Combine(exchangeDirectory, $"{requestId}.result.h5");
             await File.WriteAllTextAsync(
                 inputPath,
-                WslPyEidorsReconstructionBackend.BuildRequestJson(request),
+                WslPyEidorsReconstructionBackend.BuildProfileRequestJson(request, options),
                 cancellationToken).ConfigureAwait(false);
             if (File.Exists(outputPath))
             {
@@ -66,40 +69,67 @@ public sealed class WslPyEidorsOneShotReconstructionBackend : IRealtimeReconstru
             var stderr = await stderrTask.ConfigureAwait(false);
             if (process.ExitCode != 0)
             {
-                throw new InvalidOperationException(
-                    "PyEIDORS one-shot reconstruction failed."
-                    + Environment.NewLine
-                    + $"command: {DescribeStartInfo(startInfo)}"
+                var diagnostics =
+                    $"command: {DescribeStartInfo(startInfo)}"
                     + Environment.NewLine
                     + $"exit: {process.ExitCode}"
                     + Environment.NewLine
                     + $"stdout: {TrimForMessage(stdout)}"
                     + Environment.NewLine
-                    + $"stderr: {TrimForMessage(stderr)}");
+                    + $"stderr: {TrimForMessage(stderr)}";
+                throw CreateBackendFailureException(
+                    stderr,
+                    stdout,
+                    process.ExitCode,
+                    diagnostics);
             }
 
             if (!File.Exists(outputPath))
             {
-                throw new FileNotFoundException(
-                    "PyEIDORS one-shot reconstruction did not produce result HDF5."
-                    + Environment.NewLine
-                    + $"command: {DescribeStartInfo(startInfo)}"
-                    + Environment.NewLine
-                    + $"stdout: {TrimForMessage(stdout)}"
-                    + Environment.NewLine
-                    + $"stderr: {TrimForMessage(stderr)}",
-                    outputPath);
+                throw PyEidorsReconstructionException.FromBackend(
+                    "BackendOutputContractError",
+                    "one-shot process exited successfully but did not produce the reconstruction result HDF5",
+                    diagnostics:
+                        $"command: {DescribeStartInfo(startInfo)}"
+                        + Environment.NewLine
+                        + $"output: {outputPath}"
+                        + Environment.NewLine
+                        + $"stdout: {TrimForMessage(stdout)}"
+                        + Environment.NewLine
+                        + $"stderr: {TrimForMessage(stderr)}");
             }
 
-            return resultReader.Read(
-                outputPath,
-                request.BlockNumber,
-                stopwatch.Elapsed,
-                request.PersistResultFiles) with
+            try
             {
-                ReconstructionScaleStatus = request.ReconstructionScaleStatus,
-                ReconstructionScaleProvenance = request.ReconstructionScaleProvenance
-            };
+                return resultReader.Read(
+                    outputPath,
+                    request.BlockNumber,
+                    stopwatch.Elapsed,
+                    request.PersistResultFiles,
+                    options.BackendRequiresCanonicalMeshIndex) with
+                {
+                    ReconstructionScaleStatus = request.ReconstructionScaleStatus,
+                    ReconstructionScaleProvenance = request.ReconstructionScaleProvenance
+                };
+            }
+            catch (Exception ex) when (ex is not PyEidorsReconstructionException)
+            {
+                throw PyEidorsReconstructionException.FromFrontendResult(outputPath, ex);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (PyEidorsReconstructionException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw PyEidorsReconstructionException.FromFrontendProcessing(
+                "后端启动/传输桥接",
+                ex);
         }
         finally
         {
@@ -343,9 +373,236 @@ public sealed class WslPyEidorsOneShotReconstructionBackend : IRealtimeReconstru
 
     private static string TrimForMessage(string value)
     {
-        value = value.Trim();
-        return value.Length <= 4000 ? value : value[^4000..];
+        return value.Trim();
     }
+
+    internal static PyEidorsReconstructionException CreateBackendFailureException(
+        string stderr,
+        string stdout,
+        int exitCode,
+        string diagnostics)
+    {
+        var failure = ParseBackendFailure(stderr, stdout, exitCode);
+        return PyEidorsReconstructionException.FromBackend(
+            failure.ErrorType,
+            failure.Detail,
+            failure.Traceback,
+            diagnostics);
+    }
+
+    private static BackendFailurePayload ParseBackendFailure(
+        string stderr,
+        string stdout,
+        int exitCode)
+    {
+        string? structuredPayloadError = null;
+        foreach (var output in new[] { stderr, stdout })
+        {
+            if (TryParseStructuredBackendFailure(
+                output,
+                out var structuredFailure,
+                out var parseError))
+            {
+                return structuredFailure;
+            }
+
+            structuredPayloadError ??= parseError;
+        }
+
+        var traceback = FirstNonEmpty(stderr, stdout);
+        if (structuredPayloadError is not null)
+        {
+            return new BackendFailurePayload(
+                "BackendErrorPayloadContractError",
+                $"backend emitted malformed structured error payload: {structuredPayloadError}",
+                traceback);
+        }
+
+        foreach (var output in new[] { stderr, stdout })
+        {
+            if (TryParseLegacyBackendFailure(output, out var legacyFailure))
+            {
+                return legacyFailure;
+            }
+        }
+
+        BackendFailurePayload? wrapperFailure = null;
+        foreach (var output in new[] { stderr, stdout })
+        {
+            foreach (var line in SplitOutputLines(output).Reverse())
+            {
+                var separator = line.IndexOf(':', StringComparison.Ordinal);
+                if (separator <= 0)
+                {
+                    continue;
+                }
+
+                var candidate = line[..separator].Trim();
+                var simpleName = candidate.Split('.').LastOrDefault() ?? string.Empty;
+                if (!IsExceptionType(candidate, simpleName))
+                {
+                    continue;
+                }
+
+                var detail = line[(separator + 1)..].Trim();
+                var parsed = new BackendFailurePayload(
+                    candidate,
+                    string.IsNullOrWhiteSpace(detail) ? FirstNonEmpty(stderr, stdout) : detail,
+                    FirstNonEmpty(output, traceback));
+                if (string.Equals(simpleName, "ReconstructionExecutionError", StringComparison.Ordinal))
+                {
+                    wrapperFailure ??= parsed;
+                    continue;
+                }
+
+                return parsed;
+            }
+        }
+
+        return wrapperFailure ?? new BackendFailurePayload(
+            $"ProcessExitCode{exitCode}",
+            FirstNonEmpty(stderr, stdout, "backend process exited without an error message"),
+            traceback);
+    }
+
+    private static bool TryParseStructuredBackendFailure(
+        string output,
+        out BackendFailurePayload failure,
+        out string? parseError)
+    {
+        failure = null!;
+        parseError = null;
+        foreach (var line in SplitOutputLines(output).Reverse())
+        {
+            if (!line.StartsWith(StructuredBackendErrorPrefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var payloadJson = line[StructuredBackendErrorPrefix.Length..].Trim();
+            try
+            {
+                using var document = JsonDocument.Parse(payloadJson);
+                var root = document.RootElement;
+                var origin = ReadPayloadString(root, "error_origin");
+                var errorType = ReadPayloadString(root, "error_type");
+                var detail = ReadPayloadString(root, "error", "detail", "error_msg");
+                var traceback = ReadPayloadString(root, "traceback", "backend_traceback");
+                if (!string.Equals(origin, "backend", StringComparison.Ordinal)
+                    || string.IsNullOrWhiteSpace(errorType)
+                    || string.IsNullOrWhiteSpace(detail)
+                    || string.IsNullOrWhiteSpace(traceback))
+                {
+                    parseError ??=
+                        "error_origin='backend', error_type, error and traceback are required strings";
+                    continue;
+                }
+
+                failure = new BackendFailurePayload(
+                    errorType,
+                    detail,
+                    traceback);
+                return true;
+            }
+            catch (JsonException ex)
+            {
+                parseError ??= ex.Message;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryParseLegacyBackendFailure(
+        string output,
+        out BackendFailurePayload failure)
+    {
+        failure = null!;
+        foreach (var line in SplitOutputLines(output).Reverse())
+        {
+            if (!line.StartsWith(LegacyBackendErrorPrefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var closingBracket = line.IndexOf(']', LegacyBackendErrorPrefix.Length);
+            if (closingBracket <= LegacyBackendErrorPrefix.Length)
+            {
+                continue;
+            }
+
+            var errorType = line[LegacyBackendErrorPrefix.Length..closingBracket].Trim();
+            if (!IsQualifiedExceptionType(errorType))
+            {
+                continue;
+            }
+
+            var detailStart = closingBracket + 1;
+            if (detailStart < line.Length && line[detailStart] == ':')
+            {
+                detailStart++;
+            }
+
+            var detail = line[detailStart..].Trim();
+            failure = new BackendFailurePayload(
+                errorType,
+                string.IsNullOrWhiteSpace(detail) ? FirstNonEmpty(output) : detail,
+                FirstNonEmpty(output));
+            return true;
+        }
+
+        return false;
+    }
+
+    private static IReadOnlyList<string> SplitOutputLines(string output)
+    {
+        return output.Split(
+            ['\r', '\n'],
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+
+    private static bool IsExceptionType(string candidate, string simpleName)
+    {
+        return IsQualifiedExceptionType(candidate)
+            && (simpleName.EndsWith("Error", StringComparison.Ordinal)
+                || simpleName.EndsWith("Exception", StringComparison.Ordinal));
+    }
+
+    private static bool IsQualifiedExceptionType(string value)
+    {
+        return value.Length > 0
+            && value.All(character => char.IsLetterOrDigit(character) || character is '_' or '.');
+    }
+
+    private static string? ReadPayloadString(JsonElement root, params string[] names)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        foreach (var name in names)
+        {
+            if (root.TryGetProperty(name, out var value)
+                && value.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(value.GetString()))
+            {
+                return value.GetString()!.Trim();
+            }
+        }
+
+        return null;
+    }
+
+    private static string FirstNonEmpty(params string?[] values)
+    {
+        return values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim() ?? string.Empty;
+    }
+
+    private sealed record BackendFailurePayload(
+        string ErrorType,
+        string Detail,
+        string? Traceback);
 
     private static string DescribeStartInfo(ProcessStartInfo startInfo)
     {

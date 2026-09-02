@@ -544,12 +544,23 @@ internal sealed class RealtimeBlockConsumerController
             var reference = state.ReferenceVoltage208!.ToArray();
             var selectedBlock = temporalSelection.Block;
             var scheduledBlock = selectedBlock.BlockNumber;
-            var timeout = RealtimeReconstructionController.GetRequestTimeout(Volatile.Read(ref state.ReconstructionFrames));
+            var startupDegradedReference = state.StartupDegradedReference;
+            var provisionalPreview = state.ReferenceIsProvisional;
+            var degradedDemodulation = startupDegradedReference is not null || provisionalPreview;
+            var timeout = RealtimeReconstructionController.GetRequestTimeout(
+                Volatile.Read(ref state.ReconstructionFrames),
+                config.EnableDynamicKalman &&
+                !degradedDemodulation &&
+                state.DynamicKalmanResetPending,
+                Volatile.Read(ref state.BackendSessionWarmupPending));
             var isWarmup = timeout == RealtimeReconstructionController.WarmupTimeout;
             if (ShouldLogRealtimeBlockMilestone(scheduledBlock))
             {
+                var timeoutLabel = isWarmup
+                    ? "manual-cancel-only"
+                    : FormattableString.Invariant($"{timeout.TotalSeconds:F0}s");
                 presentation.Diagnostic(
-                    $"{config.SetLabel} schedule reconstruction block={scheduledBlock} timeout={timeout.TotalSeconds:F0}s");
+                    $"{config.SetLabel} schedule reconstruction block={scheduledBlock} timeout={timeoutLabel}");
             }
 
             if (ShouldUpdateRealtimeStatus(state))
@@ -559,12 +570,10 @@ internal sealed class RealtimeBlockConsumerController
                         ? $" · 公共尺度 α={commonScale:F6}"
                         : string.Empty;
                 presentation.PublishReconstructionActivity(config.SetLabel, isWarmup
-                    ? $"重构状态：首次预热 · 最长 {timeout.TotalSeconds:F0}s{commonScaleStatus}"
+                    ? $"重构状态：首次编译预热 · 不设自动超时，可随时停止{commonScaleStatus}"
                     : $"重构状态：连续运行 · {config.ReconstructionRoute}{commonScaleStatus}");
             }
 
-            var startupDegradedReference = state.StartupDegradedReference;
-            var provisionalPreview = state.ReferenceIsProvisional;
             if (!state.TryScheduleReconstruction(
                     () => reconstruction.ExecuteAsync(
                         config,
@@ -579,7 +588,7 @@ internal sealed class RealtimeBlockConsumerController
                         temporalSelection.ContactResult,
                         temporalSelection.TemplateDisplayPackage,
                         boundaryChangeDecision,
-                        degradedDemodulation: startupDegradedReference is not null || provisionalPreview,
+                        degradedDemodulation,
                         imageQualityCap: provisionalPreview
                             ? RealtimeProvisionalReferenceImageQualityCap
                             : startupDegradedReference?.ImageQualityCap,

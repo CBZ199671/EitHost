@@ -682,9 +682,16 @@ internal sealed class ReplayVisualizationController : IDisposable
                 return;
             }
 
-            var nextCurveGeometry = CreateSeriesGeometry(frame.MeanAmplitude208);
-            var replayContactStates = ParseReplayElectrodeStates(frame.ElectrodeStates);
             var presentation = ReadPresentation(frame.ReconstructionPresentationJson);
+            var isOfflineComplete = string.Equals(
+                frame.ReconstructionLane,
+                ReconstructionLane.OfflineComplete,
+                StringComparison.Ordinal);
+            var nextCurveGeometry = CreateSeriesGeometry(frame.MeanAmplitude208);
+            var replayContactStates = ParseReplayElectrodeStates(
+                isOfflineComplete
+                    ? presentation?.ElectrodeStates
+                    : presentation?.ElectrodeStates ?? frame.ElectrodeStates);
             var neutral = frame.ReconstructionFrameOutcome is not null &&
                 frame.ReconstructionFrameOutcome != ReconstructionFrameOutcome.Reconstructed ||
                 string.Equals(presentation?.OverlayDisposition, "neutral", StringComparison.Ordinal);
@@ -696,10 +703,20 @@ internal sealed class ReplayVisualizationController : IDisposable
                 var imagePixelSize = VisualizationGeometry.ClampImagePixelSize(workspace.RoiImageCanvasSize);
                 nextImageSource = await Task.Run(() =>
                     replayImageRasterCache.RenderNeutral(replayContactStates, imagePixelSize)).ConfigureAwait(true);
-                reconText = frame.ReconstructionFrameOutcome == ReconstructionFrameOutcome.Neutral
-                    ? "中性帧（未执行逆问题）"
-                    : $"已排除：{frame.ReconstructionExclusionReason ?? frame.ReconstructionFrameOutcome}";
-                roiText = "ROI 无重构结果";
+                if (frame.ReconstructionFrameOutcome == ReconstructionFrameOutcome.Reconstructed)
+                {
+                    reconText = "中性显示（逆解已完成，Kalman 时序连续）";
+                    roiText = frame.Conductivity is { Length: > 0 }
+                        ? "ROI 重构结果已保留"
+                        : "ROI 重构结果不可用";
+                }
+                else
+                {
+                    reconText = frame.ReconstructionFrameOutcome == ReconstructionFrameOutcome.Neutral
+                        ? "中性帧（未执行逆问题）"
+                        : $"已排除：{frame.ReconstructionExclusionReason ?? frame.ReconstructionFrameOutcome}";
+                    roiText = "ROI 无重构结果";
+                }
             }
             else if (frame.Conductivity is { Length: > 0 } conductivity
                 && detail.NodeCoords is { } nodes
@@ -791,7 +808,25 @@ internal sealed class ReplayVisualizationController : IDisposable
                 $"帧 {displayIndex}/{frames.Count} · block {frame.BlockNumber} · {frame.CapturedAt.ToLocalTime():HH:mm:ss.fff} · " +
                 $"线路 {DescribeLane(frame.ReconstructionLane)} · outcome {frame.ReconstructionFrameOutcome ?? "legacy"} · " +
                 $"参考 {replayReference}{replayActionAudit} · 质量 {frame.QualityWeight:F2} ({frame.AcceptedFrames}/{totalFrames}) · {reconText} · {roiText}";
-            var nextContactSummary = FormatReplayContactSummary(frame, replayContactStates);
+            var contactFrame = isOfflineComplete
+                ? frame with
+                {
+                    ElectrodeStates = presentation?.ElectrodeStates ?? [],
+                    ContactSummary = string.IsNullOrWhiteSpace(presentation?.ContactSummary)
+                        ? "离线独立接触诊断证据不可用 · offline-contact-unavailable:missing-or-invalid-presentation"
+                        : string.IsNullOrWhiteSpace(presentation.ContactEvidencePolicy)
+                            ? $"{presentation.ContactSummary} · offline-contact-unavailable:missing-policy"
+                            : $"{presentation.ContactSummary} · {presentation.ContactEvidencePolicy}"
+                }
+                : string.IsNullOrWhiteSpace(presentation?.ContactSummary)
+                    ? frame
+                    : frame with
+                    {
+                        ContactSummary = string.IsNullOrWhiteSpace(presentation.ContactEvidencePolicy)
+                            ? presentation.ContactSummary
+                            : $"{presentation.ContactSummary} · {presentation.ContactEvidencePolicy}"
+                    };
+            var nextContactSummary = FormatReplayContactSummary(contactFrame, replayContactStates);
 
             displayedReplayFrameIndex = Math.Clamp(index, 0, frames.Count - 1);
             workspace.CommitReplayFramePresentation(
@@ -1030,17 +1065,26 @@ internal sealed class ReplayVisualizationController : IDisposable
         CancellationToken cancellationToken)
     {
         var frameBlocks = frames.Select(frame => frame.BlockNumber).ToHashSet();
-        var trustedNeutralEvidence = runSource is ReconstructionLaneReplaySource evidenceSource
+        var evidenceSource = runSource as ReconstructionLaneReplaySource;
+        var allTrustedNeutralEvidence = evidenceSource is not null
             ? evidenceSource.ListRealtimeRoiEvidence()
-                .Where(evidence => !frameBlocks.Contains(evidence.SourceBlockNumber))
-                .ToArray()
             : [];
+        var trustedNeutralEvidenceByBlock = allTrustedNeutralEvidence.ToDictionary(
+            evidence => evidence.SourceBlockNumber);
         var timeline = frames
-            .Select(frame => new ReplayRoiTimelineEntry(frame, null))
-            .Concat(trustedNeutralEvidence.Select(evidence => new ReplayRoiTimelineEntry(null, evidence)))
+            .Select(frame => new ReplayRoiTimelineEntry(
+                frame,
+                evidenceSource?.HasPersistedLaneFrame(frame.BlockNumber) != true &&
+                trustedNeutralEvidenceByBlock.TryGetValue(frame.BlockNumber, out var evidence)
+                    ? evidence
+                    : null))
+            .Concat(allTrustedNeutralEvidence
+                .Where(evidence => !frameBlocks.Contains(evidence.SourceBlockNumber))
+                .Select(evidence => new ReplayRoiTimelineEntry(null, evidence)))
             .OrderBy(item => item.CapturedAt)
             .ThenBy(item => item.BlockNumber)
             .ToArray();
+        var trustedNeutralEvidenceCount = timeline.Count(item => item.TrustedNeutralEvidence is not null);
         var points = new List<RoiCurvePoint>(timeline.Length);
         var fixedSamples = new List<FixedRoiTemporalSample>(timeline.Length);
         var paddingFraction = VisualizationGeometry.ImagePaddingFraction;
@@ -1056,19 +1100,22 @@ internal sealed class ReplayVisualizationController : IDisposable
             var laneProgress = new CallbackProgress<ReconstructionLaneRoiReadProgress>(update =>
                 progress?.Report(new ReplayRoiProgress(
                     "读取",
-                    Math.Min(timeline.Length, trustedNeutralEvidence.Length + update.CompletedFrameCount),
+                    Math.Min(timeline.Length, trustedNeutralEvidenceCount + update.CompletedFrameCount),
                     timeline.Length)));
             laneFrames = laneSource.ReadRoiFrames(
                 detail.ImagingRunId,
                 detail,
-                frames.Select(frame => frame.BlockNumber).ToArray(),
+                frames
+                    .Where(frame => frame.HasConductivity)
+                    .Select(frame => frame.BlockNumber)
+                    .ToArray(),
                 laneProgress,
                 cancellationToken).FramesByBlock;
         }
 
         var parameterEntity = detail.ReconstructionParameterEntity;
         var neutralConductivity = Array.Empty<double>();
-        if (trustedNeutralEvidence.Length > 0)
+        if (trustedNeutralEvidenceCount > 0)
         {
             parameterEntity = ReconstructionMeshIndexMetadata.FromPersisted(
                 detail.MeshIndexSchema,

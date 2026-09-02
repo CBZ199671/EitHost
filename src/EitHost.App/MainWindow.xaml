@@ -1318,7 +1318,7 @@
                                                                         Command="{Binding BrowseRealtimeBackendPathCommand}"
                                                                         Style="{StaticResource BrowseButton}"
                                                                         IsEnabled="{Binding CanEditRealtimeBackendSettings}"
-                                                                        ToolTip="选择 WSL2 中的 PyEIDORS 仓库目录" />
+                                                                        ToolTip="选择 WSL2 中的 PyEIDORS 安装根目录（推荐 ~/apps/PyEIDORS）" />
                                                             </Grid>
                                                             <TextBlock Text="{Binding RealtimeBackendStatus}"
                                                                        Style="{StaticResource HintText}"

@@ -132,4 +132,8 @@ public sealed record ReconstructionFramePresentation(
     double? ScaleRange,
     string OverlayDisposition,
     bool LowConfidence,
-    string Stats);
+    string Stats,
+    string[]? ElectrodeStates = null,
+    string? ContactSummary = null,
+    string? ContactEvidencePolicy = null,
+    string? BoundaryChangeAction = null);

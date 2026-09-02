@@ -10,7 +10,10 @@ public sealed record WslPyEidorsBackendProfile(
     string WorkerLaunchCommand,
     string? DoctorCommand,
     bool RequiresGpu,
-    bool RequiresAmgx);
+    bool RequiresAmgx)
+{
+    public bool RequiresCanonicalMeshIndex { get; init; }
+}
 
 public static class WslPyEidorsBackendManifest
 {
@@ -38,9 +41,19 @@ public static class WslPyEidorsBackendManifest
             throw new InvalidOperationException("请选择 PyEIDORS 后端路线。");
         }
 
-        if (!TryLoadProfile(options.DistroName, options.BackendRepositoryPath, profileName, out var profile))
+        var profiles = LoadProfilesOrThrow(
+            options.DistroName,
+            options.BackendRepositoryPath,
+            requireDefaultProfile: false);
+        var profile = profiles.FirstOrDefault(candidate => string.Equals(
+            candidate.ProfileName,
+            profileName.Trim(),
+            StringComparison.Ordinal));
+        if (profile is null)
         {
-            throw new InvalidOperationException(
+            throw PyEidorsReconstructionException.FromFrontendConfiguration(
+                ResolveManifestPath(options.DistroName, options.BackendRepositoryPath),
+                "BackendManifestProfileNotFound",
                 $"PyEIDORS 后端清单中不存在路线 '{profileName}'，请重新选择后端目录或路线。");
         }
 
@@ -51,10 +64,24 @@ public static class WslPyEidorsBackendManifest
         WslPyEidorsReconstructionOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
-        options = RemoveLegacyImplicitFallback(options);
+        var normalizedOptions = RemoveLegacyImplicitFallback(options);
+        if (normalizedOptions != options)
+        {
+            _ = LoadProfilesOrThrow(
+                options.DistroName,
+                options.BackendRepositoryPath);
+        }
+
+        options = normalizedOptions;
         if (!string.IsNullOrWhiteSpace(options.BackendProfile))
         {
-            return ApplyProfileIfManifestExists(options, options.BackendProfile);
+            if (string.Equals(options.BackendProfile, CustomProfile, StringComparison.Ordinal)
+                && (!string.IsNullOrWhiteSpace(options.WorkerLaunchCommand) || options.UseNixDevelop))
+            {
+                return options;
+            }
+
+            return ApplyProfile(options, options.BackendProfile);
         }
 
         if (!string.IsNullOrWhiteSpace(options.WorkerLaunchCommand) || options.UseNixDevelop)
@@ -85,6 +112,123 @@ public static class WslPyEidorsBackendManifest
             : [];
     }
 
+    public static IReadOnlyList<WslPyEidorsBackendProfile> LoadProfilesOrThrow(
+        string distroName,
+        string backendRepositoryPath,
+        bool requireDefaultProfile = true)
+    {
+        var manifestPath = FileName;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(distroName)
+                || string.IsNullOrWhiteSpace(backendRepositoryPath))
+            {
+                throw PyEidorsReconstructionException.FromFrontendConfiguration(
+                    manifestPath,
+                    "BackendManifestPathInvalid",
+                    "WSL 发行版和 PyEIDORS 后端安装根目录不能为空。");
+            }
+
+            manifestPath = Path.Combine(backendRepositoryPath.Trim(), FileName);
+            manifestPath = ResolveManifestPath(distroName, backendRepositoryPath);
+            if (!File.Exists(manifestPath))
+            {
+                throw PyEidorsReconstructionException.FromFrontendConfiguration(
+                    manifestPath,
+                    "BackendManifestNotFound",
+                    "所选目录中不存在 pyeidors.backend.json；请选择 ~/apps/PyEIDORS 稳定软件根目录。");
+            }
+
+            using var document = JsonDocument.Parse(
+                File.ReadAllText(manifestPath),
+                new JsonDocumentOptions
+                {
+                    AllowTrailingCommas = JsonOptions.AllowTrailingCommas,
+                    CommentHandling = JsonCommentHandling.Skip
+                });
+            var root = document.RootElement;
+            if (!root.TryGetProperty("profiles", out var profileElements)
+                || profileElements.ValueKind != JsonValueKind.Object)
+            {
+                throw PyEidorsReconstructionException.FromFrontendConfiguration(
+                    manifestPath,
+                    "BackendManifestContractError",
+                    "pyeidors.backend.json 缺少 profiles 对象。");
+            }
+
+            if (root.TryGetProperty("requiresCanonicalMeshIndex", out var canonicalRequirement)
+                && canonicalRequirement.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+            {
+                throw PyEidorsReconstructionException.FromFrontendConfiguration(
+                    manifestPath,
+                    "BackendManifestContractError",
+                    "pyeidors.backend.json 的 requiresCanonicalMeshIndex 必须是布尔值。");
+            }
+
+            var requiresCanonicalMeshIndex = canonicalRequirement.ValueKind == JsonValueKind.True;
+
+            var profiles = new List<WslPyEidorsBackendProfile>();
+            foreach (var property in profileElements.EnumerateObject())
+            {
+                if (property.Value.ValueKind != JsonValueKind.Object
+                    || !HasValidOptionalBoolean(property.Value, "requiresGpu")
+                    || !HasValidOptionalBoolean(property.Value, "requiresAmgx")
+                    || !TryReadProfile(property.Name, property.Value, out var profile)
+                    || (profile.RequiresAmgx && !profile.RequiresGpu))
+                {
+                    throw PyEidorsReconstructionException.FromFrontendConfiguration(
+                        manifestPath,
+                        "BackendManifestContractError",
+                        $"pyeidors.backend.json 的 profile '{property.Name}' 字段无效；"
+                        + "workerLaunchCommand 必须非空，GPU/AMGX 标志必须是布尔值，且 AMGX 必须同时要求 GPU。");
+                }
+
+                profiles.Add(profile with
+                {
+                    RequiresCanonicalMeshIndex = requiresCanonicalMeshIndex
+                });
+            }
+
+            var defaultProfile = ReadString(root, "defaultProfile");
+            if (profiles.Count == 0
+                || (requireDefaultProfile && string.IsNullOrWhiteSpace(defaultProfile))
+                || (!string.IsNullOrWhiteSpace(defaultProfile)
+                    && !profiles.Any(profile => string.Equals(
+                    profile.ProfileName,
+                    defaultProfile,
+                    StringComparison.Ordinal))))
+            {
+                throw PyEidorsReconstructionException.FromFrontendConfiguration(
+                    manifestPath,
+                    "BackendManifestContractError",
+                    "pyeidors.backend.json 没有可用 profile，或 defaultProfile 未指向有效 profile。");
+            }
+
+            return profiles;
+        }
+        catch (PyEidorsReconstructionException)
+        {
+            throw;
+        }
+        catch (JsonException ex)
+        {
+            throw PyEidorsReconstructionException.FromFrontendConfiguration(
+                manifestPath,
+                "BackendManifestJsonError",
+                ex.Message,
+                ex);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+            or ArgumentException or InvalidOperationException or NotSupportedException)
+        {
+            throw PyEidorsReconstructionException.FromFrontendConfiguration(
+                manifestPath,
+                ex.GetType().Name,
+                ex.Message,
+                ex);
+        }
+    }
+
     public static bool TryLoadProfiles(
         string distroName,
         string backendRepositoryPath,
@@ -98,6 +242,9 @@ public static class WslPyEidorsBackendManifest
 
         using (document)
         {
+            var requiresCanonicalMeshIndex = ReadBoolean(
+                document.RootElement,
+                "requiresCanonicalMeshIndex");
             if (!document.RootElement.TryGetProperty("profiles", out var profileElements)
                 || profileElements.ValueKind != JsonValueKind.Object)
             {
@@ -109,7 +256,10 @@ public static class WslPyEidorsBackendManifest
             {
                 if (TryReadProfile(property.Name, property.Value, out var profile))
                 {
-                    parsed.Add(profile);
+                    parsed.Add(profile with
+                    {
+                        RequiresCanonicalMeshIndex = requiresCanonicalMeshIndex
+                    });
                 }
             }
 
@@ -152,7 +302,16 @@ public static class WslPyEidorsBackendManifest
                 return false;
             }
 
-            return TryReadProfile(profileName, profileElement, out profile);
+            if (!TryReadProfile(profileName, profileElement, out profile))
+            {
+                return false;
+            }
+
+            profile = profile with
+            {
+                RequiresCanonicalMeshIndex = ReadBoolean(root, "requiresCanonicalMeshIndex")
+            };
+            return true;
         }
     }
 
@@ -241,6 +400,9 @@ public static class WslPyEidorsBackendManifest
         return options with
         {
             BackendProfile = profile.ProfileName,
+            BackendRequiresGpu = profile.RequiresGpu,
+            BackendRequiresAmgx = profile.RequiresAmgx,
+            BackendRequiresCanonicalMeshIndex = profile.RequiresCanonicalMeshIndex,
             UseNixDevelop = false,
             WorkerLaunchCommand = profile.WorkerLaunchCommand,
             DoctorCommand = profile.DoctorCommand
@@ -263,6 +425,9 @@ public static class WslPyEidorsBackendManifest
             ? options with
             {
                 BackendProfile = string.Empty,
+                BackendRequiresGpu = false,
+                BackendRequiresAmgx = false,
+                BackendRequiresCanonicalMeshIndex = false,
                 WorkerLaunchCommand = null,
                 DoctorCommand = null
             }
@@ -279,5 +444,11 @@ public static class WslPyEidorsBackendManifest
     private static bool ReadBoolean(JsonElement element, string propertyName)
     {
         return element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.True;
+    }
+
+    private static bool HasValidOptionalBoolean(JsonElement element, string propertyName)
+    {
+        return !element.TryGetProperty(propertyName, out var value)
+            || value.ValueKind is JsonValueKind.True or JsonValueKind.False;
     }
 }

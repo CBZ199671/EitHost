@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
+using EitHost.Core.Application.Realtime;
 using EitHost.Core.Diagnostics.ElectrodeContact;
 using EitHost.Core.Reconstruction;
 using EitHost.Core.Storage.Frames;
@@ -48,6 +49,11 @@ public sealed class ExperimentOfflineCompleteService
 {
     private const long EstimatedBytesPerReconstruction = 512L * 1024L;
     private const long StorageSafetyBytes = 64L * 1024L * 1024L;
+    private const int OfflineReferenceMinimumFrameCount = 100;
+    private const string OfflineContactEvidencePolicyVersion = "offline-contact-full-complex-256-v1";
+    private const string OfflineBoundaryEvidencePolicyVersion = "offline-boundary-reference-candidates-v1";
+    private const string OfflineContactUnavailablePrefix = "offline-contact-unavailable";
+    private const string OfflineBoundaryUnavailablePrefix = "offline-boundary-unavailable";
     private readonly DataRootLayout layout;
     private readonly ExperimentCatalog catalog;
     private readonly IRealtimeReconstructionBackend backend;
@@ -304,6 +310,11 @@ public sealed class ExperimentOfflineCompleteService
                 .ThenBy(epoch => epoch.ReferenceEpoch)
                 .ToArray();
             ValidateReferenceEpochs(epochs);
+            var referenceCandidates = replaySource.ListReferenceCandidates(experimentRunId);
+            var diagnosticStates = CreateOfflineDiagnosticStates(
+                manifest,
+                epochs,
+                referenceCandidates);
             var artifactLookup = catalog.ListDerivedArtifacts(experimentRunId)
                 .GroupBy(item => (item.BlockNumber, item.Kind))
                 .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.CreatedAt).First());
@@ -314,7 +325,11 @@ public sealed class ExperimentOfflineCompleteService
                 inputs.Add(ReadInput(block, manifest, epochs, artifactLookup));
             }
 
-            var plans = CreatePlans(inputs, manifest);
+            var diagnosedInputs = ApplyIndependentContactDiagnostics(
+                inputs,
+                manifest,
+                diagnosticStates);
+            var plans = CreatePlans(diagnosedInputs, manifest);
             progress?.Report(new ExperimentCatchUpProgress(
                 experimentRunId,
                 ExperimentCatchUpPhase.Reconstructing,
@@ -322,9 +337,15 @@ public sealed class ExperimentOfflineCompleteService
                 plans.Count));
             var completed = 0;
             var presentationScale = new RealtimeImageColorScaleTracker();
+            OfflineBlockInput? previousPresentationInput = null;
             foreach (var plan in plans)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                var presentation = EvaluateOfflinePresentation(
+                    plan,
+                    diagnosticStates,
+                    previousPresentationInput);
+                previousPresentationInput = plan.Input;
                 if (plan.Outcome == ReconstructionFrameOutcome.Reconstructed)
                 {
                     await ReconstructAndRecordAsync(
@@ -333,12 +354,13 @@ public sealed class ExperimentOfflineCompleteService
                         fingerprint,
                         manifest,
                         plan,
+                        presentation,
                         presentationScale,
                         cancellationToken).ConfigureAwait(false);
                 }
                 else
                 {
-                    RecordTerminalOutcome(run, revisionId, fingerprint, plan);
+                    RecordTerminalOutcome(run, revisionId, fingerprint, plan, presentation);
                 }
 
                 completed++;
@@ -388,24 +410,14 @@ public sealed class ExperimentOfflineCompleteService
             throw new InvalidDataException($"block {block.BlockNumber} 缺少 demod 工件。");
         }
 
-        artifacts.TryGetValue((block.BlockNumber, "diagnostics"), out var diagnosticsArtifact);
-        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            demodArtifact.ArtifactPath
-        };
-        if (diagnosticsArtifact is not null)
-        {
-            paths.Add(diagnosticsArtifact.ArtifactPath);
-        }
-
         double[]? target = null;
-        double[]? baseWeights = null;
+        double[]? fullAmplitude256 = null;
+        double[]? fullReal256 = null;
+        double[]? fullImaginary256 = null;
         var highQuality = block.AcceptedFrameCount >= manifest.Demodulation.MinimumAcceptedFrames;
-        var invalidated = false;
-        var basePolicy = string.Empty;
-        foreach (var relativePath in paths)
+        using (var file = Hdf5FileAccess.OpenReadWithRetry(
+                   layout.ResolveArtifactPath(demodArtifact.ArtifactPath)))
         {
-            using var file = Hdf5FileAccess.OpenReadWithRetry(layout.ResolveArtifactPath(relativePath));
             var blockRoot = file.LinkExists(DataRootLayout.GetDerivedBlockRoot(block.BlockNumber))
                 ? DataRootLayout.GetDerivedBlockRoot(block.BlockNumber)
                 : string.Empty;
@@ -420,19 +432,9 @@ public sealed class ExperimentOfflineCompleteService
                 highQuality = file.Dataset(At(blockRoot, "/quality/is_high_quality")).Read<bool>();
             }
 
-            if (file.LinkExists(At(blockRoot, "/diagnostics/measurement_weight_208")))
-            {
-                baseWeights = file.Dataset(At(blockRoot, "/diagnostics/measurement_weight_208")).Read<double[]>();
-            }
-
-            if (file.LinkExists(At(blockRoot, "/diagnostics/metadata_json")))
-            {
-                var metadata = JsonSerializer.Deserialize<DerivedFrameDiagnosticsMetadata>(
-                    file.Dataset(At(blockRoot, "/diagnostics/metadata_json")).Read<string>())
-                    ?? throw new InvalidDataException($"block {block.BlockNumber} 的诊断元数据无效。");
-                invalidated |= metadata.ReferenceInvalidated;
-                basePolicy = metadata.WeightPolicyVersion;
-            }
+            fullAmplitude256 = ReadOptionalVector(file, At(blockRoot, "/demod/mean_full_amplitude_256"));
+            fullReal256 = ReadOptionalVector(file, At(blockRoot, "/demod/mean_full_real_256"));
+            fullImaginary256 = ReadOptionalVector(file, At(blockRoot, "/demod/mean_full_imaginary_256"));
         }
 
         if (target is not { Length: RealtimeReconstructionRequest.BoundaryVoltageCount })
@@ -443,39 +445,341 @@ public sealed class ExperimentOfflineCompleteService
         var epoch = epochs.LastOrDefault(candidate =>
             candidate.LockedStartSampleIndex >= 0 &&
             candidate.LockedStartSampleIndex < block.SourceStartSampleIndex);
-        if (epoch is not null && baseWeights is not { Length: RealtimeReconstructionRequest.BoundaryVoltageCount })
-        {
-            throw new InvalidDataException(
-                $"block {block.BlockNumber} 缺少时序前诊断权重；禁止回退为 all-one。");
-        }
-
-        if (baseWeights is not null && baseWeights.Any(weight => !double.IsFinite(weight) || weight is < 0.0 or > 1.0))
-        {
-            throw new InvalidDataException($"block {block.BlockNumber} 的诊断权重越界。");
-        }
-
-        var normalizedTarget = target;
-        var policy = string.IsNullOrWhiteSpace(basePolicy) ? "recorded-diagnostic-v1" : basePolicy;
-        if (epoch is not null && EcdCwrReferenceScalePolicy.UsesCommonScaleNormalization(
-                manifest.Reference.ScalePolicy))
-        {
-            normalizedTarget = EcdCwrCommonScaleNormalizer
-                .NormalizeVector(epoch.ReferenceAmplitude208, target)
-                .Values;
-            if (!policy.Contains(EcdCwrCommonScaleNormalizer.PolicyVersion, StringComparison.Ordinal))
-            {
-                policy += $"+{EcdCwrCommonScaleNormalizer.PolicyVersion}";
-            }
-        }
 
         return new OfflineBlockInput(
             block,
-            normalizedTarget,
-            baseWeights,
-            policy,
+            target,
+            null,
+            fullAmplitude256,
+            fullReal256,
+            fullImaginary256,
+            null,
+            string.Empty,
+            null,
             highQuality,
-            invalidated,
-            epoch);
+            ReferenceInvalidated: false,
+            epoch,
+            ElectrodeStates: null,
+            ContactSummary: null,
+            ContactEvidencePolicy: $"{OfflineContactUnavailablePrefix}:not-evaluated");
+    }
+
+    private static IReadOnlyDictionary<int, OfflineDiagnosticState> CreateOfflineDiagnosticStates(
+        ReconstructionPipelineManifestPayload manifest,
+        IReadOnlyList<ImagingReferenceEpochRecord> epochs,
+        IReadOnlyList<ImagingReferenceCandidateRecord> candidates)
+    {
+        var duplicateCandidate = candidates
+            .GroupBy(candidate => candidate.SourceId, StringComparer.Ordinal)
+            .FirstOrDefault(group => group.Count() > 1);
+        if (duplicateCandidate is not null)
+        {
+            throw new InvalidDataException(
+                $"参考候选 source id 重复：{duplicateCandidate.Key}；无法独立重建离线参考噪声模型。");
+        }
+
+        var candidatesById = candidates.ToDictionary(candidate => candidate.SourceId, StringComparer.Ordinal);
+        var states = new Dictionary<int, OfflineDiagnosticState>();
+        foreach (var epoch in epochs)
+        {
+            var boundary = CreateOfflineBoundaryState(manifest, epoch, candidatesById);
+            ElectrodeContactMonitor? contactMonitor = null;
+            if (boundary.ReferenceFullReal256 is not null && boundary.ReferenceFullImaginary256 is not null)
+            {
+                var baseline = ElectrodeContactBaseline.FromReference(
+                    UnflattenFullObservation(boundary.ReferenceFullReal256, nameof(boundary.ReferenceFullReal256)),
+                    UnflattenFullObservation(boundary.ReferenceFullImaginary256, nameof(boundary.ReferenceFullImaginary256)));
+                contactMonitor = new ElectrodeContactMonitor(
+                    baseline,
+                    RealtimeReferenceTolerancePolicy.CreateContactMonitorOptions());
+            }
+
+            states.Add(
+                epoch.ReferenceEpoch,
+                new OfflineDiagnosticState(
+                    contactMonitor,
+                    boundary.Gate,
+                    boundary.NoisePrecisionWeight208,
+                    boundary.ReferenceAmplitude208,
+                    boundary.Status));
+        }
+
+        return states;
+    }
+
+    private static OfflineBoundaryState CreateOfflineBoundaryState(
+        ReconstructionPipelineManifestPayload manifest,
+        ImagingReferenceEpochRecord epoch,
+        IReadOnlyDictionary<string, ImagingReferenceCandidateRecord> candidatesById)
+    {
+        if (epoch.SourceCandidateIds is not { Length: >= OfflineReferenceMinimumFrameCount } sourceIds)
+        {
+            return OfflineBoundaryState.Unavailable("missing-exact-reference-candidate-ids");
+        }
+
+        if (sourceIds.Any(string.IsNullOrWhiteSpace) ||
+            sourceIds.Distinct(StringComparer.Ordinal).Count() != sourceIds.Length)
+        {
+            return OfflineBoundaryState.Unavailable("invalid-exact-reference-candidate-ids");
+        }
+
+        var observations = new List<EcdCwrRobustReferenceObservation>(sourceIds.Length);
+        foreach (var sourceId in sourceIds)
+        {
+            if (!candidatesById.TryGetValue(sourceId, out var candidate) ||
+                candidate.ImagingRunId != epoch.ImagingRunId)
+            {
+                return OfflineBoundaryState.Unavailable($"missing-reference-candidate:{sourceId}");
+            }
+
+            observations.Add(new EcdCwrRobustReferenceObservation(
+                candidate.Voltage208,
+                candidate.FullReal256,
+                candidate.FullImaginary256));
+        }
+
+        try
+        {
+            var rebuilt = new EcdCwrRobustReferenceBuilder().CreateFromObservations(
+                observations,
+                new EcdCwrRobustReferenceOptions(
+                    MinimumFrameCount: OfflineReferenceMinimumFrameCount,
+                    NormalizeCommonScale: EcdCwrReferenceScalePolicy.UsesCommonScaleNormalization(
+                        epoch.ReferenceScalePolicy),
+                    PhysicalAdcLsbVolts: manifest.Demodulation.AdcLsbVolts,
+                    DetrendNoiseModel: string.Equals(
+                        epoch.NoiseEstimationPolicy,
+                        "linear_detrended_residual-v1",
+                        StringComparison.Ordinal)));
+            if (rebuilt.NoiseModel is not { } noiseModel ||
+                !VectorsNearlyEqual(rebuilt.Voltage208, epoch.ReferenceAmplitude208) ||
+                !VectorsNearlyEqual(rebuilt.FullReal256, epoch.ReferenceFullReal256) ||
+                !VectorsNearlyEqual(rebuilt.FullImaginary256, epoch.ReferenceFullImaginary256) ||
+                epoch.NoiseGlobalThreshold is { } threshold &&
+                !NearlyEqual(noiseModel.GlobalScoreThreshold, threshold) ||
+                epoch.NoisePrecisionWeight208 is { } precision &&
+                !VectorsNearlyEqual(noiseModel.PrecisionWeight208, precision))
+            {
+                return OfflineBoundaryState.Unavailable("reference-candidate-rebuild-mismatch");
+            }
+
+            return new OfflineBoundaryState(
+                new EcdCwrBoundaryChangeGate(noiseModel),
+                noiseModel.PrecisionWeight208.ToArray(),
+                rebuilt.Voltage208.ToArray(),
+                rebuilt.FullReal256.ToArray(),
+                rebuilt.FullImaginary256.ToArray(),
+                OfflineBoundaryEvidencePolicyVersion);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            return OfflineBoundaryState.Unavailable(
+                $"reference-candidate-rebuild-failed:{ex.GetType().Name}:{ex.Message}");
+        }
+    }
+
+    private static IReadOnlyList<OfflineBlockInput> ApplyIndependentContactDiagnostics(
+        IReadOnlyList<OfflineBlockInput> inputs,
+        ReconstructionPipelineManifestPayload manifest,
+        IReadOnlyDictionary<int, OfflineDiagnosticState> diagnosticStates)
+    {
+        if (manifest.Weighting.OutlierCompensation && !manifest.Demodulation.OutlierDetection)
+        {
+            throw new InvalidDataException(
+                "算法清单启用了异常电极补偿但关闭了异常检测；无法生成独立离线权重。");
+        }
+
+        var result = new List<OfflineBlockInput>(inputs.Count);
+        foreach (var input in inputs)
+        {
+            if (input.ReferenceEpoch is null)
+            {
+                result.Add(input with
+                {
+                    ContactSummary = "尚无匹配参考 epoch，未执行离线接触诊断。",
+                    ContactEvidencePolicy = $"{OfflineContactUnavailablePrefix}:no-reference-epoch"
+                });
+                continue;
+            }
+
+            if (!diagnosticStates.TryGetValue(input.ReferenceEpoch.ReferenceEpoch, out var diagnosticState))
+            {
+                throw new InvalidDataException(
+                    $"block {input.Block.BlockNumber} 缺少 reference epoch {input.ReferenceEpoch.ReferenceEpoch} 的离线诊断状态。");
+            }
+
+            var independentReference208 = diagnosticState.ReferenceAmplitude208 ??
+                input.ReferenceEpoch.ReferenceAmplitude208;
+            var normalizedTarget = EcdCwrReferenceScalePolicy.UsesCommonScaleNormalization(
+                manifest.Reference.ScalePolicy)
+                ? EcdCwrCommonScaleNormalizer.NormalizeVector(independentReference208, input.Target).Values
+                : input.Target;
+
+            if (diagnosticState.ContactMonitor is null)
+            {
+                var policy = $"{OfflineContactUnavailablePrefix}:{diagnosticState.BoundaryStatus}";
+                if (input.HighQuality && manifest.Weighting.OutlierCompensation)
+                {
+                    throw new InvalidDataException(
+                        $"block {input.Block.BlockNumber} {policy}；异常电极补偿已启用，禁止读取实时 diagnostics 或回退 persisted/all-one 权重。");
+                }
+
+                result.Add(input with
+                {
+                    Target = normalizedTarget,
+                    ReferenceVoltage208 = independentReference208,
+                    BaseWeights = Enumerable.Repeat(1.0, RealtimeReconstructionRequest.BoundaryVoltageCount).ToArray(),
+                    BasePolicy = "offline-outlier-compensation-disabled-v1",
+                    NoisePrecisionWeight208 = diagnosticState.NoisePrecisionWeight208,
+                    ReferenceInvalidated = false,
+                    ContactSummary = policy,
+                    ContactEvidencePolicy = policy
+                });
+                continue;
+            }
+
+            if (!TryValidateFullComplexInput(input, out var unavailableReason))
+            {
+                var policy = $"{OfflineContactUnavailablePrefix}:{unavailableReason}";
+                if (input.HighQuality && manifest.Weighting.OutlierCompensation)
+                {
+                    throw new InvalidDataException(
+                        $"block {input.Block.BlockNumber} {policy}；异常电极补偿已启用，禁止读取实时 diagnostics 或回退 all-one。");
+                }
+
+                result.Add(input with
+                {
+                    Target = normalizedTarget,
+                    ReferenceVoltage208 = independentReference208,
+                    BaseWeights = manifest.Weighting.OutlierCompensation
+                        ? null
+                        : Enumerable.Repeat(1.0, RealtimeReconstructionRequest.BoundaryVoltageCount).ToArray(),
+                    BasePolicy = "offline-outlier-compensation-disabled-v1",
+                    NoisePrecisionWeight208 = diagnosticState.NoisePrecisionWeight208,
+                    ReferenceInvalidated = false,
+                    ContactSummary = policy,
+                    ContactEvidencePolicy = policy
+                });
+                continue;
+            }
+
+            ElectrodeContactDiagnosticResult contact;
+            try
+            {
+                contact = diagnosticState.ContactMonitor.Update(
+                    UnflattenFullObservation(input.FullReal256!, nameof(input.FullReal256)),
+                    UnflattenFullObservation(input.FullImaginary256!, nameof(input.FullImaginary256)));
+            }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+            {
+                throw new InvalidDataException(
+                    $"block {input.Block.BlockNumber} 离线独立接触诊断失败：{ex.Message}",
+                    ex);
+            }
+
+            var baseWeights = manifest.Weighting.OutlierCompensation
+                ? contact.MeasurementWeight208.ToArray()
+                : Enumerable.Repeat(1.0, RealtimeReconstructionRequest.BoundaryVoltageCount).ToArray();
+            if (baseWeights.Length != RealtimeReconstructionRequest.BoundaryVoltageCount ||
+                baseWeights.Any(weight => !double.IsFinite(weight) || weight is < 0.0 or > 1.0))
+            {
+                throw new InvalidDataException(
+                    $"block {input.Block.BlockNumber} 的离线独立诊断权重无效。");
+            }
+
+            var basePolicy = manifest.Weighting.OutlierCompensation
+                ? $"{OfflineContactEvidencePolicyVersion}:{manifest.Reference.DiagnosticPolicyVersion}+{contact.WeightPolicyVersion}"
+                : "offline-outlier-compensation-disabled-v1";
+            if (EcdCwrReferenceScalePolicy.UsesCommonScaleNormalization(manifest.Reference.ScalePolicy))
+            {
+                basePolicy += $"+{EcdCwrCommonScaleNormalizer.PolicyVersion}";
+            }
+
+            result.Add(input with
+            {
+                Target = normalizedTarget,
+                ReferenceVoltage208 = independentReference208,
+                BaseWeights = baseWeights,
+                BasePolicy = basePolicy,
+                NoisePrecisionWeight208 = diagnosticState.NoisePrecisionWeight208,
+                ReferenceInvalidated = manifest.Demodulation.OutlierDetection && contact.ReferenceInvalidated,
+                ElectrodeStates = contact.States.Select(state => state.ToString()).ToArray(),
+                ContactSummary = contact.Summary,
+                ContactEvidencePolicy = OfflineContactEvidencePolicyVersion
+            });
+        }
+
+        return result;
+    }
+
+    private static OfflineFramePresentationEvidence EvaluateOfflinePresentation(
+        OfflineFramePlan plan,
+        IReadOnlyDictionary<int, OfflineDiagnosticState> diagnosticStates,
+        OfflineBlockInput? previousInput)
+    {
+        var input = plan.Input;
+        if (input.ReferenceEpoch is null)
+        {
+            return new OfflineFramePresentationEvidence(
+                "neutral",
+                input.ElectrodeStates,
+                input.ContactSummary,
+                input.ContactEvidencePolicy,
+                $"{OfflineBoundaryUnavailablePrefix}:no-reference-epoch",
+                plan.ExclusionReason);
+        }
+
+        if (!diagnosticStates.TryGetValue(input.ReferenceEpoch.ReferenceEpoch, out var state))
+        {
+            throw new InvalidDataException(
+                $"block {input.Block.BlockNumber} 缺少 reference epoch {input.ReferenceEpoch.ReferenceEpoch} 的离线边界状态。");
+        }
+
+        if (state.BoundaryChangeGate is null)
+        {
+            return new OfflineFramePresentationEvidence(
+                plan.Outcome == ReconstructionFrameOutcome.Reconstructed ? "conductivity" : "neutral",
+                input.ElectrodeStates,
+                input.ContactSummary,
+                input.ContactEvidencePolicy,
+                state.BoundaryStatus,
+                state.BoundaryStatus);
+        }
+
+        var continuityReset = previousInput is null ||
+            previousInput.ReferenceEpoch?.ReferenceEpoch != input.ReferenceEpoch.ReferenceEpoch ||
+            previousInput.Block.SourceEndSampleIndex != input.Block.SourceStartSampleIndex ||
+            !previousInput.HighQuality ||
+            previousInput.ReferenceInvalidated;
+        if (continuityReset)
+        {
+            state.BoundaryChangeGate.Reset();
+        }
+
+        if (!input.HighQuality || input.ReferenceInvalidated)
+        {
+            state.BoundaryChangeGate.Reset();
+            return new OfflineFramePresentationEvidence(
+                "neutral",
+                input.ElectrodeStates,
+                input.ContactSummary,
+                input.ContactEvidencePolicy,
+                $"{OfflineBoundaryUnavailablePrefix}:not-evaluated:{plan.Outcome}",
+                plan.ExclusionReason);
+        }
+
+        var decision = state.BoundaryChangeGate.Evaluate(plan.Target ?? input.Target);
+        var overlay = plan.Outcome == ReconstructionFrameOutcome.Reconstructed &&
+            decision.Action == EcdCwrBoundaryChangeAction.Change
+            ? "conductivity"
+            : "neutral";
+        return new OfflineFramePresentationEvidence(
+            overlay,
+            input.ElectrodeStates,
+            input.ContactSummary,
+            input.ContactEvidencePolicy,
+            decision.Action.ToString(),
+            $"{OfflineBoundaryEvidencePolicyVersion}: action={decision.Action}; score={decision.GlobalScore:G6}; threshold={decision.Threshold:G6}; excursions={decision.ExcursionCount}");
     }
 
     private IReadOnlyList<OfflineFramePlan> CreatePlans(
@@ -557,7 +861,7 @@ public sealed class ExperimentOfflineCompleteService
                 var policy = $"{input.BasePolicy}+{temporal.WeightPolicyVersion}:repaired1={repaired}";
                 var finalWeights = CombineWeights(
                     temporal.CombinedMeasurementWeight208,
-                    input.ReferenceEpoch!.NoisePrecisionWeight208!);
+                    input.NoisePrecisionWeight208!);
                 policy += $"+{manifest.Reference.BoundaryNoisePolicyVersion}";
                 plans[inputIndex] = ReconstructionPlan(
                     input,
@@ -607,7 +911,7 @@ public sealed class ExperimentOfflineCompleteService
                     input,
                     index,
                     ReconstructionFrameOutcome.ExcludedInvalid,
-                    !input.HighQuality ? "demod block is not high quality" : "reference invalidated by recorded diagnostics");
+                    !input.HighQuality ? "demod block is not high quality" : "reference invalidated by offline diagnostics");
                 beginsAfterGap = false;
                 continue;
             }
@@ -625,6 +929,7 @@ public sealed class ExperimentOfflineCompleteService
         string algorithmFingerprint,
         ReconstructionPipelineManifestPayload manifest,
         OfflineFramePlan plan,
+        OfflineFramePresentationEvidence presentation,
         RealtimeImageColorScaleTracker presentationScale,
         CancellationToken cancellationToken)
     {
@@ -650,7 +955,7 @@ public sealed class ExperimentOfflineCompleteService
             run.SetLabel,
             input.Block.BlockNumber,
             input.Block.AcquiredAt,
-            input.ReferenceEpoch.ReferenceAmplitude208,
+            input.ReferenceVoltage208!,
             plan.Target!,
             manifest.Demodulation.ExcitationFrequencyHz,
             manifest.Demodulation.ChannelCycles,
@@ -685,7 +990,18 @@ public sealed class ExperimentOfflineCompleteService
             presentationScale.Reset();
         }
 
-        var colorScale = presentationScale.Update(result.Conductivity);
+        double? scaleCenter = null;
+        double? scaleRange = null;
+        if (string.Equals(presentation.OverlayDisposition, "neutral", StringComparison.Ordinal))
+        {
+            presentationScale.Reset();
+        }
+        else
+        {
+            var colorScale = presentationScale.Update(result.Conductivity);
+            scaleCenter = colorScale.Center;
+            scaleRange = colorScale.Range;
+        }
 
         var existing = catalog.GetReconstructionLaneFrame(
             run.ExperimentRunId,
@@ -725,7 +1041,7 @@ public sealed class ExperimentOfflineCompleteService
             "offline-complete-v1",
             input.ReferenceEpoch.ReferenceEpoch,
             plan.WeightPolicy!,
-            input.ReferenceEpoch.ReferenceAmplitude208,
+            input.ReferenceVoltage208!,
             plan.Target,
             plan.FinalWeights,
             dynamic?.SessionId,
@@ -762,10 +1078,14 @@ public sealed class ExperimentOfflineCompleteService
             result.DynamicKalmanAction,
             CreatePresentationJson(
                 manifest,
-                "conductivity",
-                null,
-                colorScale.Center,
-                colorScale.Range),
+                presentation.OverlayDisposition,
+                presentation.Stats,
+                scaleCenter,
+                scaleRange,
+                presentation.ElectrodeStates,
+                presentation.ContactSummary,
+                presentation.ContactEvidencePolicy,
+                presentation.BoundaryChangeAction),
             SourceStartSampleIndex: input.Block.SourceStartSampleIndex,
             SourceEndSampleIndex: input.Block.SourceEndSampleIndex,
             ResultHash: HashDoubles(result.Conductivity)));
@@ -775,7 +1095,8 @@ public sealed class ExperimentOfflineCompleteService
         ExperimentRunRecord run,
         string revisionId,
         string algorithmFingerprint,
-        OfflineFramePlan plan)
+        OfflineFramePlan plan,
+        OfflineFramePresentationEvidence presentation)
     {
         var input = plan.Input;
         catalog.RecordReconstructionLaneFrame(new ReconstructionLaneFrameCatalogRecord(
@@ -793,7 +1114,11 @@ public sealed class ExperimentOfflineCompleteService
                 "neutral",
                 plan.ExclusionReason,
                 null,
-                null),
+                null,
+                presentation.ElectrodeStates,
+                presentation.ContactSummary,
+                presentation.ContactEvidencePolicy,
+                presentation.BoundaryChangeAction),
             ExclusionReason: plan.ExclusionReason,
             SourceStartSampleIndex: input.Block.SourceStartSampleIndex,
             SourceEndSampleIndex: input.Block.SourceEndSampleIndex));
@@ -1010,14 +1335,94 @@ public sealed class ExperimentOfflineCompleteService
         return first.Select((value, index) => Math.Min(value, second[index])).ToArray();
     }
 
+    private static double[]? ReadOptionalVector(IH5Group file, string path) =>
+        file.LinkExists(path) ? file.Dataset(path).Read<double[]>() : null;
+
+    private static bool TryValidateFullComplexInput(
+        OfflineBlockInput input,
+        out string unavailableReason)
+    {
+        foreach (var (values, label) in new[]
+                 {
+                     (input.FullAmplitude256, "full-amplitude-256"),
+                     (input.FullReal256, "full-real-256"),
+                     (input.FullImaginary256, "full-imaginary-256")
+                 })
+        {
+            if (values is null)
+            {
+                unavailableReason = $"missing-{label}";
+                return false;
+            }
+
+            if (values.Length != ElectrodeContactBaseline.FullObservationCount)
+            {
+                unavailableReason = $"invalid-{label}-length:{values.Length}";
+                return false;
+            }
+
+            if (values.Any(value => !double.IsFinite(value)))
+            {
+                unavailableReason = $"nonfinite-{label}";
+                return false;
+            }
+        }
+
+        unavailableReason = string.Empty;
+        return true;
+    }
+
+    private static double[,] UnflattenFullObservation(
+        IReadOnlyList<double> values,
+        string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(values, parameterName);
+        if (values.Count != ElectrodeContactBaseline.FullObservationCount ||
+            values.Any(value => !double.IsFinite(value)))
+        {
+            throw new ArgumentException(
+                "Full electrode observation must contain 256 finite values.",
+                parameterName);
+        }
+
+        var matrix = new double[ElectrodeContactBaseline.ElectrodeCount, ElectrodeContactBaseline.ElectrodeCount];
+        var offset = 0;
+        for (var stimulation = 0; stimulation < ElectrodeContactBaseline.ElectrodeCount; stimulation++)
+        {
+            for (var channel = 0; channel < ElectrodeContactBaseline.ElectrodeCount; channel++)
+            {
+                matrix[stimulation, channel] = values[offset++];
+            }
+        }
+
+        return matrix;
+    }
+
+    private static bool VectorsNearlyEqual(IReadOnlyList<double> left, IReadOnlyList<double> right) =>
+        left.Count == right.Count && left.Zip(right).All(pair => NearlyEqual(pair.First, pair.Second));
+
+    private static bool NearlyEqual(double left, double right)
+    {
+        var scale = Math.Max(1.0, Math.Max(Math.Abs(left), Math.Abs(right)));
+        return double.IsFinite(left) && double.IsFinite(right) && Math.Abs(left - right) <= 1.0e-10 * scale;
+    }
+
     private static void ValidateReferenceEpochs(IReadOnlyList<ImagingReferenceEpochRecord> epochs)
     {
         if (epochs.Any(epoch =>
                 epoch.LockedStartSampleIndex < 0 ||
                 epoch.ReferenceAmplitude208.Length != RealtimeReconstructionRequest.BoundaryVoltageCount ||
-                epoch.NoisePrecisionWeight208 is not { Length: RealtimeReconstructionRequest.BoundaryVoltageCount }))
+                epoch.ReferenceAmplitude208.Any(value => !double.IsFinite(value)) ||
+                epoch.ReferenceFullReal256.Length != ElectrodeContactBaseline.FullObservationCount ||
+                epoch.ReferenceFullReal256.Any(value => !double.IsFinite(value)) ||
+                epoch.ReferenceFullImaginary256.Length != ElectrodeContactBaseline.FullObservationCount ||
+                epoch.ReferenceFullImaginary256.Any(value => !double.IsFinite(value)) ||
+                epoch.NoisePrecisionWeight208 is { } persistedPrecision &&
+                (persistedPrecision.Length != RealtimeReconstructionRequest.BoundaryVoltageCount ||
+                 persistedPrecision.Any(weight => !double.IsFinite(weight) || weight is <= 0.0 or > 1.0))))
         {
-            throw new InvalidDataException("参考 epoch 缺少安全样本锚点、208 点参考电压或噪声 precision 权重。");
+            throw new InvalidDataException(
+                "参考 epoch 缺少安全样本锚点、有限 208 点参考、有限 full-complex 256 baseline，或其可选噪声 precision 权重无效。");
         }
     }
 
@@ -1047,7 +1452,11 @@ public sealed class ExperimentOfflineCompleteService
         string overlay,
         string? reason,
         double? scaleCenter,
-        double? scaleRange)
+        double? scaleRange,
+        string[]? electrodeStates = null,
+        string? contactSummary = null,
+        string? contactEvidencePolicy = null,
+        string? boundaryChangeAction = null)
     {
         return JsonSerializer.Serialize(new
         {
@@ -1059,7 +1468,11 @@ public sealed class ExperimentOfflineCompleteService
             ScaleRange = scaleRange,
             OverlayDisposition = overlay,
             LowConfidence = false,
-            Stats = reason ?? "offline-complete"
+            Stats = reason ?? "offline-complete",
+            ElectrodeStates = electrodeStates,
+            ContactSummary = contactSummary,
+            ContactEvidencePolicy = contactEvidencePolicy,
+            BoundaryChangeAction = boundaryChangeAction
         });
     }
 
@@ -1130,11 +1543,19 @@ public sealed class ExperimentOfflineCompleteService
     private sealed record OfflineBlockInput(
         ProcessingBlockCatalogRecord Block,
         double[] Target,
+        double[]? ReferenceVoltage208,
+        double[]? FullAmplitude256,
+        double[]? FullReal256,
+        double[]? FullImaginary256,
         double[]? BaseWeights,
         string BasePolicy,
+        double[]? NoisePrecisionWeight208,
         bool HighQuality,
         bool ReferenceInvalidated,
-        ImagingReferenceEpochRecord? ReferenceEpoch);
+        ImagingReferenceEpochRecord? ReferenceEpoch,
+        string[]? ElectrodeStates,
+        string? ContactSummary,
+        string ContactEvidencePolicy);
 
     private sealed record OfflineFramePlan(
         OfflineBlockInput Input,
@@ -1147,4 +1568,48 @@ public sealed class ExperimentOfflineCompleteService
         double[]? FinalWeights,
         string? WeightPolicy,
         string? ExclusionReason);
+
+    private sealed class OfflineDiagnosticState(
+        ElectrodeContactMonitor? contactMonitor,
+        EcdCwrBoundaryChangeGate? boundaryChangeGate,
+        double[] noisePrecisionWeight208,
+        double[]? referenceAmplitude208,
+        string boundaryStatus)
+    {
+        public ElectrodeContactMonitor? ContactMonitor { get; } = contactMonitor;
+
+        public EcdCwrBoundaryChangeGate? BoundaryChangeGate { get; } = boundaryChangeGate;
+
+        public double[] NoisePrecisionWeight208 { get; } = noisePrecisionWeight208;
+
+        public double[]? ReferenceAmplitude208 { get; } = referenceAmplitude208;
+
+        public string BoundaryStatus { get; } = boundaryStatus;
+    }
+
+    private sealed record OfflineBoundaryState(
+        EcdCwrBoundaryChangeGate? Gate,
+        double[] NoisePrecisionWeight208,
+        double[]? ReferenceAmplitude208,
+        double[]? ReferenceFullReal256,
+        double[]? ReferenceFullImaginary256,
+        string Status)
+    {
+        public static OfflineBoundaryState Unavailable(string reason) =>
+            new(
+                null,
+                Enumerable.Repeat(1.0, RealtimeReconstructionRequest.BoundaryVoltageCount).ToArray(),
+                null,
+                null,
+                null,
+                $"{OfflineBoundaryUnavailablePrefix}:{reason}");
+    }
+
+    private sealed record OfflineFramePresentationEvidence(
+        string OverlayDisposition,
+        string[]? ElectrodeStates,
+        string? ContactSummary,
+        string ContactEvidencePolicy,
+        string BoundaryChangeAction,
+        string? Stats);
 }

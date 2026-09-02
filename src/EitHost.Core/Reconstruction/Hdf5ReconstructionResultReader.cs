@@ -10,12 +10,28 @@ public sealed class Hdf5ReconstructionResultReader
         string outputHdf5Path,
         int blockNumber,
         TimeSpan backendElapsed,
-        bool outputPersisted = true)
+        bool outputPersisted = true,
+        bool requireCanonicalMeshIndex = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputHdf5Path);
         var fullPath = Path.GetFullPath(outputHdf5Path);
         using var file = Hdf5FileAccess.OpenReadWithRetry(fullPath);
+        if (TryReadBackendFailure(file) is { } backendFailure)
+        {
+            throw PyEidorsReconstructionException.FromBackend(
+                backendFailure.ErrorType,
+                backendFailure.Detail,
+                backendFailure.Traceback,
+                $"backend result HDF5: {fullPath}");
+        }
+
         var conductivity = ReadDoubleVector(file.Dataset("/conductivity"));
+        if (conductivity.Length == 0)
+        {
+            throw new InvalidDataException(
+                "PyEIDORS result contract violation: /conductivity is empty.");
+        }
+
         var rawConductivity = TryReadDoubleVector(file, "/conductivity_raw");
         var nodeCoords = ReadDoubleMatrix(file.Dataset("/node_coords"));
         var cellConnectivity = ReadIntMatrix(file.Dataset("/cell_connectivity"));
@@ -24,7 +40,7 @@ public sealed class Hdf5ReconstructionResultReader
             nodeCoords,
             cellConnectivity,
             conductivity.Length,
-            requireCanonical: false);
+            requireCanonical: requireCanonicalMeshIndex);
         var measured = TryReadDoubleVector(file, "/measured");
         var simulated = TryReadDoubleVector(file, "/simulated");
         var contactJacobian = TryReadContactJacobian(file);
@@ -34,9 +50,6 @@ public sealed class Hdf5ReconstructionResultReader
             "/weighted_system_condition_number",
             "/condition_number",
             "/condition_estimate");
-        var error = conductivity.Length == 0
-            ? "PyEIDORS returned an empty conductivity vector."
-            : null;
         return new RealtimeReconstructionResult(
             blockNumber,
             fullPath,
@@ -45,7 +58,7 @@ public sealed class Hdf5ReconstructionResultReader
             cellConnectivity,
             DateTimeOffset.Now,
             backendElapsed,
-            error,
+            ErrorMessage: null,
             outputPersisted,
             measured,
             simulated,
@@ -80,6 +93,49 @@ public sealed class Hdf5ReconstructionResultReader
             ContactJacobianStatus: contactJacobian.Status,
             ContactJacobianSource: contactJacobian.Source,
             MeshIndexMetadata: meshIndexMetadata);
+    }
+
+    private static BackendFailureMetadata? TryReadBackendFailure(IH5Group file)
+    {
+        if (!file.AttributeExists("metadata_json"))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(file.Attribute("metadata_json").Read<string>());
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("error_msg", out var errorMessage)
+                || errorMessage.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(errorMessage.GetString()))
+            {
+                return null;
+            }
+
+            var metadata = root.TryGetProperty("metadata", out var nestedMetadata)
+                && nestedMetadata.ValueKind == JsonValueKind.Object
+                    ? nestedMetadata
+                    : root;
+            return new BackendFailureMetadata(
+                ReadOptionalString(metadata, "backend_error_type") ?? "ReconstructionExecutionError",
+                errorMessage.GetString()!.Trim(),
+                ReadOptionalString(metadata, "backend_traceback"));
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static string? ReadOptionalString(JsonElement element, string propertyName)
+    {
+        return element.TryGetProperty(propertyName, out var value)
+            && value.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(value.GetString())
+                ? value.GetString()!.Trim()
+                : null;
     }
 
     private static ReconstructionMeshIndexMetadata ReadMeshIndexMetadata(IH5Group file)
@@ -547,6 +603,11 @@ public sealed class Hdf5ReconstructionResultReader
             return new ContactJacobianReadResult(null, measurementSpace, status, source);
         }
     }
+
+    private sealed record BackendFailureMetadata(
+        string ErrorType,
+        string Detail,
+        string? Traceback);
 
 #pragma warning disable CS0649
     private struct Hdf5Complex128

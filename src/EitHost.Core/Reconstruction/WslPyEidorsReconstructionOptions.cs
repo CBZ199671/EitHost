@@ -12,6 +12,12 @@ public sealed record WslPyEidorsReconstructionOptions(
     string? WorkerLaunchCommand = null,
     string? DoctorCommand = null)
 {
+    internal bool BackendRequiresGpu { get; init; }
+
+    internal bool BackendRequiresAmgx { get; init; }
+
+    internal bool BackendRequiresCanonicalMeshIndex { get; init; }
+
     public string ResolveExchangeDirectory()
     {
         return string.IsNullOrWhiteSpace(ExchangeDirectory)

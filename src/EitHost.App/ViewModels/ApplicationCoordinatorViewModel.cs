@@ -3172,7 +3172,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
     {
         var dialog = new Microsoft.Win32.OpenFolderDialog
         {
-            Title = "选择 WSL2 中的 PyEIDORS 仓库目录"
+            Title = "选择 WSL2 中的 PyEIDORS 安装根目录（推荐 ~/apps/PyEIDORS）"
         };
         var initialDirectory = realtimeBackend.InitialDirectory;
         if (!string.IsNullOrWhiteSpace(initialDirectory) && Directory.Exists(initialDirectory))

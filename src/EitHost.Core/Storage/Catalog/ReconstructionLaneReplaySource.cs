@@ -30,6 +30,7 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
     private readonly IReadOnlyList<ReconstructionLaneFrameCatalogRecord> laneFrames;
     private readonly IReadOnlyDictionary<int, ReconstructionLaneFrameCatalogRecord> framesByBlock;
     private readonly IReadOnlyList<RealtimeRoiEvidenceCatalogRecord> trustedNeutralRoiEvidence;
+    private readonly IReadOnlyDictionary<int, RealtimeRoiEvidenceCatalogRecord> trustedNeutralEvidenceByBlock;
     private readonly GlobalReconstructionMeshStore meshStore;
     private ImagingRunDetail? laneDetail;
 
@@ -60,7 +61,12 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
         framesByBlock = laneFrames.ToDictionary(frame => frame.SourceBlockNumber);
         trustedNeutralRoiEvidence = string.Equals(lane, ReconstructionLane.Live, StringComparison.Ordinal)
             ? catalog.ListRealtimeRoiEvidence(experimentRunId, revisionId)
+                .OrderBy(evidence => evidence.AcquiredAt)
+                .ThenBy(evidence => evidence.SourceBlockNumber)
+                .ToArray()
             : [];
+        trustedNeutralEvidenceByBlock = trustedNeutralRoiEvidence.ToDictionary(
+            evidence => evidence.SourceBlockNumber);
         if (laneFrames.Count != revision.DemodDenominator)
         {
             throw new InvalidDataException(
@@ -76,6 +82,8 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
 
     public IReadOnlyList<RealtimeRoiEvidenceCatalogRecord> ListRealtimeRoiEvidence() =>
         trustedNeutralRoiEvidence;
+
+    public bool HasPersistedLaneFrame(int blockNumber) => framesByBlock.ContainsKey(blockNumber);
 
     public ImagingRunDetail? GetImagingRunDetail(Guid imagingRunId)
     {
@@ -145,7 +153,7 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
             return [];
         }
 
-        return laneFrames.Select(frame =>
+        var laneEntries = laneFrames.Select(frame =>
         {
             var block = catalog.GetProcessingBlock(imagingRunId, frame.SourceBlockNumber);
             return new ImagingFrameIndexEntry(
@@ -155,7 +163,25 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
                 block?.AcceptedFrameCount ?? 0,
                 block?.RejectedFrameCount ?? 0,
                 frame.Outcome == ReconstructionFrameOutcome.Reconstructed);
-        }).ToArray();
+        });
+        var evidenceEntries = trustedNeutralRoiEvidence
+            .Where(evidence => !framesByBlock.ContainsKey(evidence.SourceBlockNumber))
+            .Select(evidence =>
+            {
+                var block = GetValidatedTrustedNeutralBlock(evidence);
+                return new ImagingFrameIndexEntry(
+                    evidence.SourceBlockNumber,
+                    evidence.AcquiredAt,
+                    evidence.QualityWeight,
+                    block.AcceptedFrameCount,
+                    block.RejectedFrameCount,
+                    HasConductivity: false);
+            });
+        return laneEntries
+            .Concat(evidenceEntries)
+            .OrderBy(entry => entry.CapturedAt)
+            .ThenBy(entry => entry.BlockNumber)
+            .ToArray();
     }
 
     public IReadOnlyList<ImagingReferenceEpochRecord> ListReferenceEpochs(Guid imagingRunId) =>
@@ -258,17 +284,72 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
 
     public ImagingFrameDetail? GetFrame(Guid imagingRunId, int blockNumber)
     {
-        if (imagingRunId != experimentRunId || !framesByBlock.TryGetValue(blockNumber, out var laneFrame))
+        if (imagingRunId != experimentRunId)
+        {
+            return null;
+        }
+
+        framesByBlock.TryGetValue(blockNumber, out var laneFrame);
+        trustedNeutralEvidenceByBlock.TryGetValue(blockNumber, out var trustedNeutralEvidence);
+        if (laneFrame is null && trustedNeutralEvidence is null)
         {
             return null;
         }
 
         var frame = canonical.GetFrame(imagingRunId, blockNumber)
             ?? throw new InvalidDataException($"Canonical demodulated frame {blockNumber} is unavailable.");
+        if (laneFrame is null)
+        {
+            GetValidatedTrustedNeutralBlock(trustedNeutralEvidence!);
+            return frame with
+            {
+                Conductivity = null,
+                RawConductivity = null,
+                MeasurementWeight208 = null,
+                ReconstructionConditionNumber = null,
+                ReferenceEpoch = trustedNeutralEvidence!.ReferenceEpoch,
+                DynamicKalmanSessionId = null,
+                DynamicKalmanAction = null,
+                DynamicKalmanNisPerDof = null,
+                DynamicKalmanGainMean = null,
+                DynamicKalmanVarianceInflation = null,
+                DynamicKalmanUpdateCount = null,
+                DynamicKalmanTotalLatencyFrames = null,
+                DynamicKalmanMode = null,
+                DynamicKalmanFallback = null,
+                DynamicKalmanSolveMilliseconds = null,
+                ReconstructionBackendElapsedMilliseconds = null,
+                ReconstructionLane = revision.Lane,
+                ReconstructionRevisionId = revision.RevisionId,
+                ReconstructionFrameOutcome = ReconstructionFrameOutcome.Neutral,
+                ReconstructionPresentationJson = JsonSerializer.Serialize(new ReconstructionFramePresentation(
+                    "realtime-raster-v2",
+                    "blue-white-red-v1",
+                    "normal",
+                    1.0,
+                    null,
+                    null,
+                    "neutral",
+                    false,
+                    "trusted-neutral replay evidence")),
+                ReconstructionExclusionReason = null,
+                ReconstructionAlgorithmFingerprint = revision.AlgorithmFingerprint,
+                ReconstructionMeshFingerprint = null,
+                ReconstructionMeshArtifactPath = null
+            };
+        }
+
+        var isOfflineComplete = string.Equals(
+            laneFrame.Lane,
+            ReconstructionLane.OfflineComplete,
+            StringComparison.Ordinal);
+        var offlinePresentation = isOfflineComplete
+            ? ReadPersistedPresentation(laneFrame.PresentationJson)
+            : null;
         var conductivity = default(double[]);
         var rawConductivity = default(double[]);
-        var weights = frame.MeasurementWeight208;
-        var conditionNumber = frame.ReconstructionConditionNumber;
+        var weights = isOfflineComplete ? null : frame.MeasurementWeight208;
+        var conditionNumber = isOfflineComplete ? null : frame.ReconstructionConditionNumber;
         var referenceEpoch = frame.ReferenceEpoch;
         DerivedReconstructionMetadata? metadata = null;
         if (laneFrame.ArtifactPath is { } artifactPath && laneFrame.DatasetPath is not null)
@@ -317,8 +398,57 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
             Conductivity = conductivity,
             RawConductivity = rawConductivity,
             MeasurementWeight208 = weights,
+            WeightPolicyVersion = isOfflineComplete
+                ? offlinePresentation?.ContactEvidencePolicy ??
+                  "offline-contact-unavailable:missing-or-invalid-presentation"
+                : frame.WeightPolicyVersion,
+            ImageQualityScore = isOfflineComplete ? null : frame.ImageQualityScore,
             ReconstructionConditionNumber = conditionNumber,
+            ElectrodeScores = isOfflineComplete ? null : frame.ElectrodeScores,
+            FaultConfidence = isOfflineComplete ? null : frame.FaultConfidence,
+            ElectrodeStates = isOfflineComplete
+                ? offlinePresentation?.ElectrodeStates ?? []
+                : frame.ElectrodeStates,
+            FaultTypes = isOfflineComplete ? null : frame.FaultTypes,
+            UpgradeGateReasons = isOfflineComplete ? null : frame.UpgradeGateReasons,
+            ContactSummary = isOfflineComplete
+                ? CreateOfflineContactSummary(offlinePresentation)
+                : frame.ContactSummary,
+            CandidateDiagnosticJson = isOfflineComplete ? null : frame.CandidateDiagnosticJson,
+            DisplayCompensationPolicy = isOfflineComplete ? null : frame.DisplayCompensationPolicy,
+            DisplayCompensationOnly = isOfflineComplete ? false : frame.DisplayCompensationOnly,
+            DisplayCompensationPayloadJson = isOfflineComplete
+                ? null
+                : frame.DisplayCompensationPayloadJson,
+            ReferenceInvalidated = isOfflineComplete ? false : frame.ReferenceInvalidated,
+            ReferenceStatus = isOfflineComplete
+                ? $"offline-independent-boundary:{offlinePresentation?.BoundaryChangeAction ?? "unavailable"}"
+                : frame.ReferenceStatus,
             ReferenceEpoch = referenceEpoch,
+            BaselineCommonScale = isOfflineComplete ? null : frame.BaselineCommonScale,
+            BaselineShapeResidualRelative = isOfflineComplete
+                ? null
+                : frame.BaselineShapeResidualRelative,
+            BaselineComplexScaleMagnitude = isOfflineComplete
+                ? null
+                : frame.BaselineComplexScaleMagnitude,
+            BaselineComplexPhaseDegrees = isOfflineComplete
+                ? null
+                : frame.BaselineComplexPhaseDegrees,
+            BaselineComplexShapeResidualRelative = isOfflineComplete
+                ? null
+                : frame.BaselineComplexShapeResidualRelative,
+            BaselineCommonModeEnergyFraction = isOfflineComplete
+                ? null
+                : frame.BaselineCommonModeEnergyFraction,
+            BaselineNearDriveScale = isOfflineComplete ? null : frame.BaselineNearDriveScale,
+            BaselineRemoteScale = isOfflineComplete ? null : frame.BaselineRemoteScale,
+            BaselineClassification = isOfflineComplete ? null : frame.BaselineClassification,
+            BaselineGlobalNoiseScore = isOfflineComplete ? null : frame.BaselineGlobalNoiseScore,
+            BaselineGlobalNoiseThreshold = isOfflineComplete
+                ? null
+                : frame.BaselineGlobalNoiseThreshold,
+            BaselineDemodStateChanged = isOfflineComplete ? null : frame.BaselineDemodStateChanged,
             DynamicKalmanSessionId = metadata?.DynamicKalmanSessionId,
             DynamicKalmanAction = metadata?.DynamicKalmanAction,
             DynamicKalmanNisPerDof = metadata?.DynamicKalmanNisPerDof,
@@ -339,6 +469,56 @@ public sealed class ReconstructionLaneReplaySource : IImagingReplaySource
             ReconstructionMeshFingerprint = metadata?.MeshFingerprint,
             ReconstructionMeshArtifactPath = metadata?.MeshArtifactPath
         };
+    }
+
+    private static ReconstructionFramePresentation? ReadPersistedPresentation(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<ReconstructionFramePresentation>(
+                json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string CreateOfflineContactSummary(ReconstructionFramePresentation? presentation)
+    {
+        if (presentation is null)
+        {
+            return "离线独立接触诊断证据不可用 · offline-contact-unavailable:missing-or-invalid-presentation";
+        }
+
+        var summary = string.IsNullOrWhiteSpace(presentation.ContactSummary)
+            ? "离线独立接触诊断无摘要"
+            : presentation.ContactSummary.Trim();
+        return string.IsNullOrWhiteSpace(presentation.ContactEvidencePolicy)
+            ? $"{summary} · offline-contact-unavailable:missing-policy"
+            : $"{summary} · {presentation.ContactEvidencePolicy}";
+    }
+
+    private ProcessingBlockCatalogRecord GetValidatedTrustedNeutralBlock(
+        RealtimeRoiEvidenceCatalogRecord evidence)
+    {
+        var block = catalog.GetProcessingBlock(experimentRunId, evidence.SourceBlockNumber)
+            ?? throw new InvalidDataException(
+                $"Trusted-neutral evidence block {evidence.SourceBlockNumber} has no canonical demodulated block.");
+        if (block.SourceStartSampleIndex != evidence.SourceStartSampleIndex ||
+            block.SourceEndSampleIndex != evidence.SourceEndSampleIndex)
+        {
+            throw new InvalidDataException(
+                $"Trusted-neutral evidence block {evidence.SourceBlockNumber} sample range does not match the canonical block.");
+        }
+
+        return block;
     }
 
     private static string ResolveConductivityDatasetPath(string recordedPath, int blockNumber)

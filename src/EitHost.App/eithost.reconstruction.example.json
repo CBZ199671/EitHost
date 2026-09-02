@@ -1,6 +1,6 @@
 {
   "DistroName": "Ubuntu-22.04",
-  "BackendRepositoryPath": "/home/your-wsl-user/workspace/PyEidors_wsl2",
+  "BackendRepositoryPath": "/home/your-wsl-user/apps/PyEIDORS",
   "BackendProfile": "",
   "UseNixDevelop": false,
   "NixDevelopProfile": "",

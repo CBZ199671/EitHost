@@ -21,7 +21,8 @@ internal sealed record RealtimeReconstructionCallbacks(
 internal sealed class RealtimeReconstructionController
 {
     private const int MaxConsecutiveFailures = 3;
-    internal static readonly TimeSpan WarmupTimeout = TimeSpan.FromSeconds(20);
+    internal static readonly TimeSpan WarmupTimeout = Timeout.InfiniteTimeSpan;
+    internal static readonly TimeSpan BackendResetTimeout = TimeSpan.FromSeconds(20);
     internal static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(3);
 
     private readonly IRealtimeReconstructionBackend backend;
@@ -39,14 +40,28 @@ internal sealed class RealtimeReconstructionController
     }
 
     internal static TimeSpan GetRequestTimeout(int completedReconstructionFrames) =>
-        completedReconstructionFrames <= 0 ? WarmupTimeout : RequestTimeout;
+        GetRequestTimeout(
+            completedReconstructionFrames,
+            backendSessionResetPending: false,
+            backendSessionWarmupPending: false);
 
     internal static TimeSpan GetRequestTimeout(
         int completedReconstructionFrames,
         bool backendSessionResetPending) =>
-        backendSessionResetPending
+        GetRequestTimeout(
+            completedReconstructionFrames,
+            backendSessionResetPending,
+            backendSessionWarmupPending: false);
+
+    internal static TimeSpan GetRequestTimeout(
+        int completedReconstructionFrames,
+        bool backendSessionResetPending,
+        bool backendSessionWarmupPending) =>
+        completedReconstructionFrames <= 0 || backendSessionWarmupPending
             ? WarmupTimeout
-            : GetRequestTimeout(completedReconstructionFrames);
+            : backendSessionResetPending
+                ? BackendResetTimeout
+                : RequestTimeout;
 
     internal async Task ExecuteAsync(
         RealtimeImagingRunConfig config,
@@ -70,18 +85,26 @@ internal sealed class RealtimeReconstructionController
             Volatile.Read(ref state.ReconstructionFrames),
             config.EnableDynamicKalman &&
             !degradedDemodulation &&
-            state.DynamicKalmanResetPending);
+            state.DynamicKalmanResetPending,
+            Volatile.Read(ref state.BackendSessionWarmupPending));
+        var hasAutomaticTimeout = timeout != Timeout.InfiniteTimeSpan;
+        var timeoutLabel = hasAutomaticTimeout
+            ? FormattableString.Invariant($"{timeout.TotalSeconds:F0}s")
+            : "manual-cancel-only";
         try
         {
             var dynamicGeneration = state.DynamicKalmanGeneration;
             if (ShouldLogMilestone(block.BlockNumber))
             {
                 callbacks.Diagnostic(
-                    $"{config.SetLabel} reconstruction begin block={block.BlockNumber} timeout={timeout.TotalSeconds:F0}s route={config.ReconstructionRoute}");
+                    $"{config.SetLabel} reconstruction begin block={block.BlockNumber} timeout={timeoutLabel} route={config.ReconstructionRoute}");
             }
 
             using var requestTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            requestTimeout.CancelAfter(timeout);
+            if (hasAutomaticTimeout)
+            {
+                requestTimeout.CancelAfter(timeout);
+            }
             var dynamicMode = state.DynamicKalmanForceSafeImage ||
                 string.Equals(config.DynamicKalmanMode, "auto", StringComparison.Ordinal)
                     ? "fast_image"
@@ -123,10 +146,11 @@ internal sealed class RealtimeReconstructionController
                 state.ReferenceUsesCommonScaleNormalization
                     ? ReconstructionScale.CommonScaleNormalizedRelativeProvenance
                     : ReconstructionScale.NormalizedModelProvenance);
-            var result = await backend
-                .ReconstructAsync(request, requestTimeout.Token)
-                .WaitAsync(timeout + TimeSpan.FromMilliseconds(250), cancellationToken)
-                .ConfigureAwait(false);
+            var reconstructionTask = backend.ReconstructAsync(request, requestTimeout.Token);
+            var boundedReconstructionTask = hasAutomaticTimeout
+                ? reconstructionTask.WaitAsync(timeout + TimeSpan.FromMilliseconds(250), cancellationToken)
+                : reconstructionTask.WaitAsync(cancellationToken);
+            var result = await boundedReconstructionTask.ConfigureAwait(false);
             if (!result.Succeeded || ShouldLogMilestone(result.BlockNumber))
             {
                 callbacks.Diagnostic(result.Succeeded
@@ -136,26 +160,45 @@ internal sealed class RealtimeReconstructionController
 
             if (result.Succeeded)
             {
-                await HandleSuccessAsync(
-                    config,
-                    state,
-                    block,
-                    reference,
-                    target,
-                    measurementWeights,
-                    weightPolicyVersion,
-                    temporalInnovationCandidate,
-                    contactResult,
-                    templateDisplayPackage,
-                    boundaryChangeDecision,
-                    degradedDemodulation,
-                    imageQualityCap,
-                    degradedStatus,
-                    publishRoiMeasurement,
-                    dynamicGeneration,
-                    dynamicKalman,
-                    acquiredAt,
-                    result).ConfigureAwait(false);
+                Volatile.Write(ref state.BackendSessionWarmupPending, false);
+                try
+                {
+                    await HandleSuccessAsync(
+                        config,
+                        state,
+                        block,
+                        reference,
+                        target,
+                        measurementWeights,
+                        weightPolicyVersion,
+                        temporalInnovationCandidate,
+                        contactResult,
+                        templateDisplayPackage,
+                        boundaryChangeDecision,
+                        degradedDemodulation,
+                        imageQualityCap,
+                        degradedStatus,
+                        publishRoiMeasurement,
+                        dynamicGeneration,
+                        dynamicKalman,
+                        acquiredAt,
+                        result).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (PyEidorsReconstructionException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    throw PyEidorsReconstructionException.FromFrontendProcessing(
+                        "结果后处理/规范网格契约/持久化",
+                        ex);
+                }
+
                 return;
             }
 
@@ -402,6 +445,7 @@ internal sealed class RealtimeReconstructionController
         TimeSpan timeout,
         bool waitTimeout)
     {
+        Volatile.Write(ref state.BackendSessionWarmupPending, true);
         var failures = RegisterFailure(state, "reconstruction timeout");
         await persistence.RecordReconstructionFailureAsync(config, state, block, persistenceMessage).ConfigureAwait(false);
         callbacks.Diagnostic(

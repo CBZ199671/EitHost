@@ -53,7 +53,7 @@ public sealed class WslPyEidorsReconstructionBackend : IRealtimeReconstructionBa
             outputPath = Path.Combine(exchangeDirectory, $"{requestId}.result.h5");
             await File.WriteAllTextAsync(
                 inputPath,
-                BuildRequestJson(request),
+                BuildProfileRequestJson(request, options),
                 cancellationToken).ConfigureAwait(false);
             if (File.Exists(outputPath))
             {
@@ -72,24 +72,64 @@ public sealed class WslPyEidorsReconstructionBackend : IRealtimeReconstructionBa
                 var details = string.IsNullOrWhiteSpace(done.Error)
                     ? GetRecentStderrText()
                     : done.Error;
-                throw new InvalidOperationException($"PyEIDORS backend reconstruction failed: {details}");
+                if (!string.IsNullOrWhiteSpace(done.ErrorOrigin)
+                    && !string.Equals(done.ErrorOrigin, "backend", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw PyEidorsReconstructionException.FromBackend(
+                        "WorkerProtocolError",
+                        $"worker declared unsupported error_origin '{done.ErrorOrigin}': {details}",
+                        done.Traceback,
+                        GetRecentStderrText());
+                }
+
+                throw PyEidorsReconstructionException.FromBackend(
+                    done.ErrorType,
+                    details,
+                    done.Traceback,
+                    GetRecentStderrText());
+            }
+
+            if (!File.Exists(outputPath))
+            {
+                throw PyEidorsReconstructionException.FromBackend(
+                    "BackendOutputContractError",
+                    "worker reported success but did not produce the reconstruction result HDF5",
+                    diagnostics: outputPath);
             }
 
             var stopwatchElapsed = done.Elapsed;
-            return resultReader.Read(
-                outputPath,
-                request.BlockNumber,
-                stopwatchElapsed,
-                request.PersistResultFiles) with
+            try
             {
-                ReconstructionScaleStatus = request.ReconstructionScaleStatus,
-                ReconstructionScaleProvenance = request.ReconstructionScaleProvenance
-            };
+                return resultReader.Read(
+                    outputPath,
+                    request.BlockNumber,
+                    stopwatchElapsed,
+                    request.PersistResultFiles,
+                    options.BackendRequiresCanonicalMeshIndex) with
+                {
+                    ReconstructionScaleStatus = request.ReconstructionScaleStatus,
+                    ReconstructionScaleProvenance = request.ReconstructionScaleProvenance
+                };
+            }
+            catch (Exception ex) when (ex is not PyEidorsReconstructionException)
+            {
+                throw PyEidorsReconstructionException.FromFrontendResult(outputPath, ex);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             RestartWorkerAfterCanceledRequest();
             throw;
+        }
+        catch (PyEidorsReconstructionException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw PyEidorsReconstructionException.FromFrontendProcessing(
+                "后端启动/传输桥接",
+                ex);
         }
         finally
         {
@@ -171,7 +211,10 @@ public sealed class WslPyEidorsReconstructionBackend : IRealtimeReconstructionBa
     {
         if (worker.HasExited)
         {
-            throw new InvalidOperationException($"PyEIDORS backend worker exited early with code {worker.ExitCode}: {GetRecentStderrText()}");
+            throw PyEidorsReconstructionException.FromBackend(
+                "WorkerProcessExit",
+                $"worker exited early with code {worker.ExitCode}",
+                diagnostics: GetRecentStderrText());
         }
 
         var pendingRequest = new TaskCompletionSource<WorkerDoneMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -207,6 +250,19 @@ public sealed class WslPyEidorsReconstructionBackend : IRealtimeReconstructionBa
 
     private async Task ReadStdoutAsync(Process worker)
     {
+        void FailProtocol(string detail, Exception? cause = null)
+        {
+            AddRecentStderr($"stdout(protocol-error): {detail}");
+            var diagnostics = cause is null
+                ? GetRecentStderrText()
+                : cause + Environment.NewLine + GetRecentStderrText();
+            FailPendingRequests(PyEidorsReconstructionException.FromBackend(
+                "WorkerProtocolError",
+                detail,
+                diagnostics: diagnostics));
+            StopWorker(sendShutdown: false, wait: TimeSpan.FromMilliseconds(250));
+        }
+
         try
         {
             while (await worker.StandardOutput.ReadLineAsync().ConfigureAwait(false) is { } line)
@@ -216,20 +272,15 @@ public sealed class WslPyEidorsReconstructionBackend : IRealtimeReconstructionBa
                     continue;
                 }
 
-                WorkerProtocolMessage? message;
+                WorkerProtocolMessage message;
                 try
                 {
                     message = ParseWorkerProtocolMessage(line);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    AddRecentStderr($"stdout(non-json): {line}");
-                    continue;
-                }
-
-                if (message is null || string.IsNullOrWhiteSpace(message.Id))
-                {
-                    continue;
+                    FailProtocol($"worker emitted invalid JSON-lines protocol output: {line}", ex);
+                    return;
                 }
 
                 if (string.Equals(message.Type, "done", StringComparison.OrdinalIgnoreCase)
@@ -238,11 +289,35 @@ public sealed class WslPyEidorsReconstructionBackend : IRealtimeReconstructionBa
                     completion.TrySetResult(new WorkerDoneMessage(
                         message.Status ?? string.Empty,
                         message.Error ?? string.Empty,
+                        message.ErrorOrigin ?? string.Empty,
+                        message.ErrorType ?? string.Empty,
+                        message.Traceback ?? string.Empty,
                         TimeSpan.Zero));
                 }
                 else if (string.Equals(message.Type, "done", StringComparison.OrdinalIgnoreCase))
                 {
-                    AddRecentStderr($"stdout(done unmatched id={message.Id})");
+                    if (!pending.IsEmpty)
+                    {
+                        FailProtocol($"worker returned unmatched done request id '{message.Id}'.");
+                        return;
+                    }
+
+                    AddRecentStderr($"stdout(done unmatched id={message.Id}, no pending request)");
+                }
+                else if (string.Equals(message.Type, "progress", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (pending.ContainsKey(message.Id))
+                    {
+                        continue;
+                    }
+
+                    if (!pending.IsEmpty)
+                    {
+                        FailProtocol($"worker returned unmatched progress request id '{message.Id}'.");
+                        return;
+                    }
+
+                    AddRecentStderr($"stdout(progress unmatched id={message.Id}, no pending request)");
                 }
             }
         }
@@ -256,7 +331,10 @@ public sealed class WslPyEidorsReconstructionBackend : IRealtimeReconstructionBa
             {
                 AddRecentStderr(WorkerExitSummary(worker));
                 await WaitForStderrDrainAsync(TimeSpan.FromMilliseconds(250)).ConfigureAwait(false);
-                FailPendingRequests(new InvalidOperationException("PyEIDORS backend worker stdout closed: " + GetRecentStderrText()));
+                FailPendingRequests(PyEidorsReconstructionException.FromBackend(
+                    "WorkerProcessExit",
+                    WorkerExitSummary(worker),
+                    diagnostics: GetRecentStderrText()));
             }
         }
     }
@@ -479,8 +557,15 @@ public sealed class WslPyEidorsReconstructionBackend : IRealtimeReconstructionBa
 
     internal static string BuildRequestJson(RealtimeReconstructionRequest request)
     {
+        return BuildProfileRequestJson(request, null);
+    }
+
+    internal static string BuildProfileRequestJson(
+        RealtimeReconstructionRequest request,
+        WslPyEidorsReconstructionOptions? options)
+    {
         var zeros = new double[RealtimeReconstructionRequest.BoundaryVoltageCount];
-        var metadata = CreateMetadata(request);
+        var metadata = CreateMetadata(request, options);
         var payload = new
         {
             reference_frame = new
@@ -511,9 +596,13 @@ public sealed class WslPyEidorsReconstructionBackend : IRealtimeReconstructionBa
         return JsonSerializer.Serialize(payload, CompactJson);
     }
 
-    internal static Dictionary<string, object?> CreateMetadata(RealtimeReconstructionRequest request)
+    internal static Dictionary<string, object?> CreateMetadata(
+        RealtimeReconstructionRequest request,
+        WslPyEidorsReconstructionOptions? options)
     {
         var route = RealtimeReconstructionRequest.NormalizeReconstructionRoute(request.ReconstructionRoute);
+        var useGpu = options?.BackendRequiresGpu == true;
+        var requiresAmgx = options?.BackendRequiresAmgx == true;
         var regularization = route switch
         {
             "laplace_rm" => "laplace",
@@ -524,6 +613,10 @@ public sealed class WslPyEidorsReconstructionBackend : IRealtimeReconstructionBa
         return new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             ["request_source"] = "EitHost realtime imaging",
+            ["backend_profile"] = options?.BackendProfile ?? string.Empty,
+            ["backend_profile_requires_gpu"] = useGpu,
+            ["backend_profile_requires_amgx"] = requiresAmgx,
+            ["backend_profile_requires_canonical_mesh_index"] = options?.BackendRequiresCanonicalMeshIndex == true,
             ["set_label"] = request.SetLabel,
             ["block_number"] = request.BlockNumber,
             ["persist_result_files"] = request.PersistResultFiles,
@@ -598,7 +691,7 @@ public sealed class WslPyEidorsReconstructionBackend : IRealtimeReconstructionBa
             ["lambda_eff"] = request.DifferenceLambda,
             ["lambda_eff_custom_enabled"] = request.CustomLambdaEnabled,
             ["device"] = "cpu",
-            ["rm_device"] = "cpu",
+            ["rm_device"] = useGpu ? "cuda" : "cpu",
             ["petsc_device"] = "cpu",
             ["forward_backend"] = "dolfinx",
             ["forward_solver_preset"] = "auto",
@@ -629,15 +722,31 @@ public sealed class WslPyEidorsReconstructionBackend : IRealtimeReconstructionBa
         }
     }
 
-    private static WorkerProtocolMessage? ParseWorkerProtocolMessage(string line)
+    private static WorkerProtocolMessage ParseWorkerProtocolMessage(string line)
     {
         using var document = JsonDocument.Parse(line);
         var root = document.RootElement;
+        var id = GetString(root, "id");
+        var type = GetString(root, "type");
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            throw new InvalidDataException("worker protocol message omitted request id");
+        }
+
+        if (!string.Equals(type, "done", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(type, "progress", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException($"worker protocol message has unsupported type '{type}'");
+        }
+
         return new WorkerProtocolMessage(
-            GetString(root, "id"),
-            GetString(root, "type"),
+            id!,
+            type!,
             GetString(root, "status"),
-            GetString(root, "error"));
+            GetString(root, "error"),
+            GetString(root, "error_origin"),
+            GetString(root, "error_type"),
+            GetString(root, "traceback"));
     }
 
     private static string? GetString(JsonElement root, string propertyName)
@@ -650,13 +759,19 @@ public sealed class WslPyEidorsReconstructionBackend : IRealtimeReconstructionBa
     }
 
     private sealed record WorkerProtocolMessage(
-        string? Id,
-        string? Type,
+        string Id,
+        string Type,
         string? Status,
-        string? Error);
+        string? Error,
+        string? ErrorOrigin,
+        string? ErrorType,
+        string? Traceback);
 
     private sealed record WorkerDoneMessage(
         string Status,
         string Error,
+        string ErrorOrigin,
+        string ErrorType,
+        string Traceback,
         TimeSpan Elapsed);
 }

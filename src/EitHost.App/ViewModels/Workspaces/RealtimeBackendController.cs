@@ -93,6 +93,9 @@ internal sealed class RealtimeBackendController : IRealtimeReconstructionBackend
         ThrowIfDisposed();
         ArgumentException.ThrowIfNullOrWhiteSpace(selectedPath);
         var updated = CreateOptionsFromSelectedPath(Options, selectedPath);
+        _ = WslPyEidorsBackendManifest.LoadProfilesOrThrow(
+            updated.DistroName,
+            updated.BackendRepositoryPath);
         await ApplyOptionsAsync(updated, cancellationToken: cancellationToken).ConfigureAwait(false);
         var configPath = WslPyEidorsReconstructionOptionsLoader.SaveUserConfig(updated);
         SetStatus($"PyEIDORS 后端路径已保存：{configPath}");
