@@ -293,6 +293,12 @@ function Assert-ExistingInstallChecksums {
             throw "Unsafe existing install checksum path: $relative"
         }
         if ($payloadRelativePaths -cnotcontains $relative) {
+            if ($relative -ceq 'EitHost.App.exe' -and
+                -not (Test-Path -LiteralPath (Join-Path $InstallRoot $relative) -PathType Leaf)) {
+                # A missing executable is repairable: the update reinstalls it. Every other
+                # manifest entry must still resolve to a present, checksum-verified file.
+                continue
+            }
             throw "Existing install checksum references an unexpected file: $relative"
         }
         if ($verified.ContainsKey($relative)) {
@@ -369,7 +375,21 @@ function Assert-ExistingInstallIdentity {
     $isLegacy = Test-ExactFileSet -Actual $actualFiles -Expected $legacyFiles
     $isCurrent = Test-ExactFileSet -Actual $actualFiles -Expected $currentFiles
     if (-not $isLegacy -and -not $isCurrent) {
-        throw "Existing nonempty install root is not an exact verified EitHost legacy or current layout: $InstallRoot"
+        # A previous install whose executable was deleted or quarantined is still a
+        # valid EitHost install when every remaining program file matches exactly;
+        # the update reinstalls the executable.
+        $legacyWithoutExecutable = @($legacyFiles | Where-Object { $_ -cne 'EitHost.App.exe' })
+        $currentWithoutExecutable = @($currentFiles | Where-Object { $_ -cne 'EitHost.App.exe' })
+        $isLegacyRepair = $actualFiles -cnotcontains 'EitHost.App.exe' -and
+            (Test-ExactFileSet -Actual $actualFiles -Expected $legacyWithoutExecutable)
+        $isCurrentRepair = $actualFiles -cnotcontains 'EitHost.App.exe' -and
+            (Test-ExactFileSet -Actual $actualFiles -Expected $currentWithoutExecutable)
+        if (-not $isLegacyRepair -and -not $isCurrentRepair) {
+            throw "Existing nonempty install root is not an exact verified EitHost legacy or current layout: $InstallRoot"
+        }
+        Write-Host "Existing install is missing EitHost.App.exe; repairing it with the packaged executable."
+        $isLegacy = $isLegacyRepair
+        $isCurrent = $isCurrentRepair
     }
     foreach ($file in $programFiles) {
         if ($file.Length -eq 0) {
@@ -379,17 +399,19 @@ function Assert-ExistingInstallIdentity {
 
     Assert-ExistingInstallChecksums -InstallRoot $InstallRoot -ProgramFiles $programFiles
     $executablePath = Join-Path $InstallRoot 'EitHost.App.exe'
-    try {
-        $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($executablePath)
-    }
-    catch {
-        throw "Existing install executable version information is unreadable: $($_.Exception.Message)"
-    }
-    if ($versionInfo.ProductName -cne 'EitHost.App' -or
-        $versionInfo.FileDescription -cne 'EitHost.App' -or
-        $versionInfo.OriginalFilename -cne 'EitHost.App.dll' -or
-        $versionInfo.InternalName -cne 'EitHost.App.dll') {
-        throw "Existing install executable does not identify EitHost.App: $executablePath"
+    if (Test-Path -LiteralPath $executablePath -PathType Leaf) {
+        try {
+            $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($executablePath)
+        }
+        catch {
+            throw "Existing install executable version information is unreadable: $($_.Exception.Message)"
+        }
+        if ($versionInfo.ProductName -cne 'EitHost.App' -or
+            $versionInfo.FileDescription -cne 'EitHost.App' -or
+            $versionInfo.OriginalFilename -cne 'EitHost.App.dll' -or
+            $versionInfo.InternalName -cne 'EitHost.App.dll') {
+            throw "Existing install executable does not identify EitHost.App: $executablePath"
+        }
     }
 
     if ($isCurrent) {
