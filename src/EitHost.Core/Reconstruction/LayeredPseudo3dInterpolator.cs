@@ -30,7 +30,15 @@ public sealed record LayeredPseudo3dVolume(
 {
     public const string KrigingAlgorithmId = "quality_aware_anisotropic_universal_kriging_2p5d_v2";
     public const string LinearAlgorithmId = "linear_z_between_2d_layers_v1";
-    public const string AlgorithmId = LinearAlgorithmId;
+
+    /// <summary>
+    /// The algorithm the workstation actually produces. Pseudo3dVisualizationController
+    /// composes every displayed volume through <see cref="KrigingAlgorithmId"/>, and the
+    /// archive store accepts no other, so this alias names that one.
+    /// <see cref="LinearAlgorithmId"/> stays for the interpolator's own linear entry point,
+    /// which nothing calls at runtime.
+    /// </summary>
+    public const string AlgorithmId = KrigingAlgorithmId;
 
     public int DisplayLayerCount => DisplayLayerZ.Length;
 
