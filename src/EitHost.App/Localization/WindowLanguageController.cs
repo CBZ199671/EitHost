@@ -309,6 +309,84 @@ internal sealed class WindowLanguageController : IDisposable
 
             AttachSubtree(container);
         }
+
+        // A grouped ItemsControl hands each GroupItem its own generator, so the loop
+        // above sees no container for the flat item indices and neither the group
+        // headers nor the rows would ever be registered. Walking what is realized
+        // covers every generator model, but the containers are still being parented
+        // when the generator reports them, so the walk has to wait for layout.
+        if (itemsControl.Items.Groups is { Count: > 0 })
+        {
+            ScheduleSubtreeAttach(itemsControl);
+        }
+    }
+
+    // AttachElement skips what it already holds, so a repeated walk only costs the
+    // traversal and only picks up containers realized since the last one.
+    private void ScheduleSubtreeAttach(DependencyObject subtreeRoot)
+    {
+        root.Dispatcher.BeginInvoke(
+            DispatcherPriority.Loaded,
+            new Action(() =>
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                AttachSubtree(subtreeRoot);
+                PruneDetachedRegistrations();
+            }));
+    }
+
+    // A refresh or a virtualization pass throws its containers away, but their
+    // registrations stay, and DependencyPropertyDescriptor.AddValueChanged holds each
+    // owner alive for good: the table would grow with every regeneration. Drop what no
+    // longer hangs off the window or a live popup scope. Anything pruned in error is
+    // registered again by the next walk.
+    private void PruneDetachedRegistrations()
+    {
+        List<DependencyObject>? detached = null;
+        foreach (var owner in registrations.Keys)
+        {
+            if (!IsAttachedToLiveScope(owner))
+            {
+                (detached ??= []).Add(owner);
+            }
+        }
+
+        if (detached is null)
+        {
+            return;
+        }
+
+        foreach (var owner in detached)
+        {
+            if (registrations.Remove(owner, out var registration))
+            {
+                registration.Dispose();
+            }
+        }
+    }
+
+    private bool IsAttachedToLiveScope(DependencyObject element)
+    {
+        var current = element;
+        for (var depth = 0; depth < 128 && current is not null; depth++)
+        {
+            if (ReferenceEquals(current, root)
+                || (current is UIElement scope && externalScopes.Contains(scope)))
+            {
+                return true;
+            }
+
+            // Content on an unselected tab, and anything else the visual tree has not
+            // realized yet, still hangs off the window logically. Only an element that
+            // reaches neither way is genuinely orphaned.
+            current = GetLayoutParent(current) ?? LogicalTreeHelper.GetParent(current);
+        }
+
+        return false;
     }
 
     private void ScheduleTemplatePopupAttach(Control owner)

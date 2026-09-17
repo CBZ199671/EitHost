@@ -1,12 +1,12 @@
 ﻿{
     "Product":  "EitHost",
     "Version":  "2.0.18",
-    "BuiltAt":  "2026-09-17T13:16:24.8095145+08:00",
+    "BuiltAt":  "2026-09-17T14:46:33.8708420+08:00",
     "Runtime":  "win-x64",
     "SelfContained":  true,
     "Trimmed":  false,
     "BundleCompression":  false,
-    "SourceCommit":  "7fd1100f7dbefea26b8b9e73e9b1fc5a14659ead",
+    "SourceCommit":  "f14b416eb5ea58580004cd7c5565b61a71e83e53",
     "SourceDirty":  false,
     "SourceFilesSha256":  [
                               "a5f16b689fe26faf225150c95fb191e69eb8b0a5378b02a5c332fc06e08e11e2  AGENTS.md",
@@ -35,7 +35,7 @@
                               "d54b87d00fdfae50f0645ba6af12985441547fa3c6ded79890f287fa4c054016  src/EitHost.App/Localization/UiLanguage.cs",
                               "5978471340bbbe487d152d243370d80bf1ec43ade315ba6cc16c2252c86183ca  src/EitHost.App/Localization/UiLanguageContext.cs",
                               "924fe2fc734585b51114f20821f14196d9a999a715980f52bd3f7265537eeba8  src/EitHost.App/Localization/UiLanguagePreference.cs",
-                              "80edf339278f747840f9d4b36a7d28ffe0956e3434cfcd94c482ba96d9bdb553  src/EitHost.App/Localization/WindowLanguageController.cs",
+                              "47bdf5ec3b1a99963b0a09d578cad278f84096a8ef340288428cb12d6d22453d  src/EitHost.App/Localization/WindowLanguageController.cs",
                               "c689d16c5a018f73efd65d4224a3cdd5788293a0d3ba664cfd276a79a73fa03d  src/EitHost.App/MainWindow.xaml",
                               "e9cae21de3992d2d1db75d0c5afe1eab7837c4fe81f1f23a272c9e59015820b5  src/EitHost.App/MainWindow.xaml.cs",
                               "e8b64d6f5e92089019311edf3510990bf3d56d4de22799cd802f15e15b95b0b5  src/EitHost.App/Native/x64/USB2070.dll",
