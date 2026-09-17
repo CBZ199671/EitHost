@@ -31,6 +31,36 @@ EitHost is a Windows desktop application for multi-set Electrical Impedance Tomo
 - **Field operations:** Device discovery, driver preflight, runtime logs, evidence export, and Chinese/English UI localization.
 - **Ready-to-run host package:** A self-contained Windows x64 build is published as a GitHub Release asset and does not require a separate .NET Runtime installation. Real-time reconstruction still requires a compatible PyEIDORS backend.
 
+## Experiment recordings
+
+Pseudo-3D conductivity imaging, recorded from the workstation during paired
+time-division acquisition. All three runs start from a background solution at
+11.4 µS/cm.
+
+**An acrylic rod and a hollow copper cylinder placed into the tank.** An insulator and a
+conductor, so the two contrast against the background in opposite directions.
+
+https://github.com/user-attachments/assets/0072fac2-f909-4c4d-a9bb-0b766d157e2b
+
+**A single droplet of 10 % w/w KCl solution.** The conductivity change spreads from the
+point where the droplet enters.
+
+https://github.com/user-attachments/assets/e7a0cb1d-0687-4dbb-99e2-d1161174b307
+
+**KCl droplets at 2 %, 4 %, 6 %, 8 % and 10 % w/w, added in sequence.** The response can be
+compared across an increasing concentration step.
+
+https://github.com/user-attachments/assets/3f3ab7dc-5a50-48eb-8475-d1362dc66486
+
+The recordings are also versioned under [`media/`](media/), which records the setup for
+each run. The pseudo-3D view interpolates linearly along z between two independent 2D
+inverse problems; it is a display-only view, not a true 3D inversion, and it carries the
+inter-layer time difference of the time-division schedule. Conductivity is shown as the
+change relative to each run's locked reference, not as a calibrated absolute reading.
+
+The first recording is encoded with HEVC (H.265), which many browsers do not play; the
+copy under `media/` opens in a desktop player. The other two are H.264.
+
 ## Architecture
 
 ```mermaid
@@ -119,6 +149,7 @@ Set `DistroName`, `BackendRepositoryPath`, and optionally `BackendProfile` for t
 | `src/EitHost.Core` | Acquisition, hardware protocols, demodulation, diagnostics, storage, synchronization, and reconstruction bridge |
 | `scripts` | USB2070 driver-installation and elevated-launch helpers |
 | `release/EitHost-Windows-x64` | Windows x64 package payload, checksums, and package notes; the self-contained EXE ships as a release asset |
+| `media` | Experiment recordings shown on this page, with the setup for each run |
 
 ## Affiliation, Laboratory, and Funding
 
