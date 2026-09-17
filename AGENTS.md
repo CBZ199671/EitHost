@@ -8,5 +8,6 @@
 - 日常禁止另建 `artifacts/.../EitHost.App*`、`dist/<版本或日期>`、桌面副本等上位机交付入口。中间构建只能放可清理的临时目录；历史版本交给 Git 管理，不自动生成归档包或持久备份目录。只有用户明确要求对外分发或另存时，才使用显式指定的归档输出目录。
 - `package.cmd`、无参数 `scripts/package-eithost.ps1`、无参数 `scripts/publish-eithost.ps1` 都必须更新唯一日常目录。若无法构建、校验或替换，明确报告实际阻塞，不能把旧程序称为最新版。
 - 交付前确认当前 EXE 版本、包文件校验、HDF5 包级自检和数据保留结果；最终给用户的运行链接只指向该目录内的 `EitHost.App.exe`。
+- `release/EitHost-Windows-x64/EitHost.App.exe` 不纳入 Git 跟踪：自包含 EXE 超过 GitHub 单文件 100 MiB 上限，作为 GitHub Release 附件分发。发布脚本照常更新本地唯一目录；`VERSION.json`、`SHA256SUMS.txt` 和随附文件仍然提交，供校验该附件。
 - 详细流程见 `packaging/RELEASE-RULES.md` 和 `packaging/开发与分发.md`。本规则是用户已经授权的常规发布要求，无需在每次发布前重复请求许可。
 

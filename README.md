@@ -29,7 +29,7 @@ EitHost is a Windows desktop application for multi-set Electrical Impedance Tomo
 - **PyEIDORS integration layer:** EitHost includes a configurable persistent WSL2 worker bridge and manifest/profile routing. The compatible PyEIDORS v2 backend currently used by the laboratory has not yet been publicly released.
 - **Visualization and analysis:** Live boundary voltages, reconstruction images, fixed-ROI temporal analysis, and a display-only pseudo-3D view linearly interpolated along z from the imaging results of two independent 2D inverse problems.
 - **Field operations:** Device discovery, driver preflight, runtime logs, evidence export, and Chinese/English UI localization.
-- **Ready-to-run host package:** A self-contained Windows x64 build is included and does not require a separate .NET Runtime installation. Real-time reconstruction still requires a compatible PyEIDORS backend.
+- **Ready-to-run host package:** A self-contained Windows x64 build is published as a GitHub Release asset and does not require a separate .NET Runtime installation. Real-time reconstruction still requires a compatible PyEIDORS backend.
 
 ## Architecture
 
@@ -63,11 +63,12 @@ While the associated research manuscript is being prepared, the PyEIDORS v2 sour
 
 ## Quick start
 
-### Run the included Windows x64 build
+### Run the published Windows x64 build
 
 1. Install the USB2070 Windows driver supplied by the hardware vendor.
 2. Clone or download this repository.
-3. Keep the complete `release/EitHost-Windows-x64` directory together, then run:
+3. Download `EitHost.App.exe` from the [latest release](https://github.com/CBZ199671/EitHost/releases/latest) and place it in `release/EitHost-Windows-x64`. The self-contained EXE exceeds GitHub's 100 MiB file limit, so it is distributed as a release asset instead of being tracked in the repository. Building from source produces the same EXE.
+4. Keep the complete `release/EitHost-Windows-x64` directory together, then run:
 
 ```powershell
 .\release\EitHost-Windows-x64\EitHost.App.exe
@@ -116,7 +117,7 @@ Set `DistroName`, `BackendRepositoryPath`, and optionally `BackendProfile` for t
 | `src/EitHost.App` | .NET 10 / WPF desktop application, workspace ViewModels, and real-time visualization |
 | `src/EitHost.Core` | Acquisition, hardware protocols, demodulation, diagnostics, storage, synchronization, and reconstruction bridge |
 | `scripts` | USB2070 driver-installation and elevated-launch helpers |
-| `release/EitHost-Windows-x64` | Ready-to-run self-contained Windows x64 build and checksums |
+| `release/EitHost-Windows-x64` | Windows x64 package payload, checksums, and package notes; the self-contained EXE ships as a release asset |
 
 ## Affiliation, Laboratory, and Funding
 

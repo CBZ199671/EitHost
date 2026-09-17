@@ -29,7 +29,7 @@ EitHost 是面向多套电阻抗成像（EIT）设备的 Windows 桌面上位机
 - **PyEIDORS 集成层：** EitHost 包含可配置的 WSL2 持久 worker 桥接与 manifest/profile 路由；实验室当前使用的兼容 PyEIDORS v2 后端尚未公开。
 - **可视化与分析：** 支持实时边界电压、重构图像、固定 ROI 时序分析，以及由两个独立二维逆问题的成像结果沿 z 方向线性插值得到的伪三维视图。
 - **现场运维：** 提供设备扫描、驱动预检、运行日志、证据导出和中英文界面。
-- **上位机开箱运行：** 仓库包含 Windows x64 自包含发布版，无需另行安装 .NET Runtime；实时重构仍需兼容的 PyEIDORS 后端。
+- **上位机开箱运行：** Windows x64 自包含发布版通过 GitHub Release 附件分发，无需另行安装 .NET Runtime；实时重构仍需兼容的 PyEIDORS 后端。
 
 ## 系统架构
 
@@ -63,11 +63,12 @@ PyEIDORS v2 是下一代重大版本，包含大量新增能力、架构改进�
 
 ## 快速开始
 
-### 直接运行 Windows x64 发布版
+### 运行已发布的 Windows x64 版本
 
 1. 从硬件厂商提供的安装包安装 USB2070 Windows 驱动。
 2. 克隆或下载本仓库。
-3. 完整保留 `release/EitHost-Windows-x64` 目录，然后运行：
+3. 从 [最新 release](https://github.com/CBZ199671/EitHost/releases/latest) 下载 `EitHost.App.exe`，放入 `release/EitHost-Windows-x64`。自包含 EXE 超过 GitHub 单文件 100 MiB 上限，因此作为 release 附件分发，不纳入仓库跟踪；从源码构建也会生成同一个 EXE。
+4. 完整保留 `release/EitHost-Windows-x64` 目录，然后运行：
 
 ```powershell
 .\release\EitHost-Windows-x64\EitHost.App.exe
@@ -116,7 +117,7 @@ notepad $configPath
 | `src/EitHost.App` | .NET 10 / WPF 桌面应用、工作区 ViewModel 与实时可视化 |
 | `src/EitHost.Core` | 采集、硬件协议、解调、诊断、存储、同步与重构桥接 |
 | `scripts` | USB2070 驱动安装与管理员启动辅助脚本 |
-| `release/EitHost-Windows-x64` | 可直接运行的 Windows x64 自包含发布版与校验值 |
+| `release/EitHost-Windows-x64` | Windows x64 发布包的随附文件、校验值与使用说明；自包含 EXE 作为 release 附件分发 |
 
 ## 实验室、单位与基金支持
 
