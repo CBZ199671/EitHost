@@ -25,18 +25,14 @@ public sealed record LayeredPseudo3dVolume(
     string ReconstructionScaleProvenance,
     string Algorithm,
     double[,]? DisplayLayerTriangleRelativeVariance = null,
-    string AlgorithmProvenance = "",
-    string? FallbackReason = null)
+    string AlgorithmProvenance = "")
 {
     public const string KrigingAlgorithmId = "quality_aware_anisotropic_universal_kriging_2p5d_v2";
-    public const string LinearAlgorithmId = "linear_z_between_2d_layers_v1";
 
     /// <summary>
-    /// The algorithm the workstation actually produces. Pseudo3dVisualizationController
-    /// composes every displayed volume through <see cref="KrigingAlgorithmId"/>, and the
-    /// archive store accepts no other, so this alias names that one.
-    /// <see cref="LinearAlgorithmId"/> stays for the interpolator's own linear entry point,
-    /// which nothing calls at runtime.
+    /// The algorithm the workstation produces. Pseudo3dVisualizationController composes
+    /// every displayed volume through <see cref="KrigingAlgorithmId"/>, and the archive
+    /// store accepts no other, so this alias names that one.
     /// </summary>
     public const string AlgorithmId = KrigingAlgorithmId;
 
@@ -62,89 +58,6 @@ public sealed record LayeredPseudo3dVolume(
 public static class LayeredPseudo3dInterpolator
 {
     private const double CoordinateTolerance = 1.0e-9;
-
-    public static LayeredPseudo3dVolume Interpolate(
-        LayeredPseudo3dSource lower,
-        LayeredPseudo3dSource upper,
-        int displayLayers = 5,
-        double normalizedHeight = 2.0,
-        string? fallbackReason = null)
-    {
-        ArgumentNullException.ThrowIfNull(lower);
-        ArgumentNullException.ThrowIfNull(upper);
-        ArgumentException.ThrowIfNullOrWhiteSpace(lower.SetLabel);
-        ArgumentException.ThrowIfNullOrWhiteSpace(upper.SetLabel);
-        if (string.Equals(lower.SetLabel, upper.SetLabel, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ArgumentException("Pseudo-3D interpolation requires two distinct set labels.");
-        }
-
-        if (displayLayers < 2)
-        {
-            throw new ArgumentOutOfRangeException(nameof(displayLayers), "Pseudo-3D display layers must be at least two.");
-        }
-
-        if (!double.IsFinite(normalizedHeight) || normalizedHeight <= 0.0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(normalizedHeight), "Pseudo-3D normalized height must be finite and positive.");
-        }
-
-        ValidateResult(lower.Result, nameof(lower));
-        ValidateResult(upper.Result, nameof(upper));
-        ValidateCompatibleScale(lower.Result, upper.Result);
-        ValidateCompatibleMeshes(lower.Result, upper.Result);
-
-        var sourceNodes = CopyFirstTwoColumns(lower.Result.NodeCoords);
-        var triangles = Triangulate(
-            lower.Result.CellConnectivity,
-            lower.Result.Conductivity,
-            sourceNodes.GetLength(0),
-            lower.Result.ParameterEntity,
-            out var lowerValues,
-            out var valuesAreNodal);
-        _ = Triangulate(
-            upper.Result.CellConnectivity,
-            upper.Result.Conductivity,
-            sourceNodes.GetLength(0),
-            upper.Result.ParameterEntity,
-            out var upperValues,
-            out var upperValuesAreNodal);
-        if (valuesAreNodal != upperValuesAreNodal || lowerValues.Length != upperValues.Length)
-        {
-            throw new InvalidDataException("Pseudo-3D layer conductivity representations do not match.");
-        }
-
-        var displayLayerZ = CreateDisplayLayerZ(displayLayers, normalizedHeight);
-        var displayValues = InterpolateDisplayValues(lowerValues, upperValues, displayLayers);
-        var nodeCoords3d = ExtrudeNodes(sourceNodes, displayLayerZ);
-        var tetraConnectivity = ExtrudeTriangles(triangles, sourceNodes.GetLength(0), displayLayers);
-        var conductivity = valuesAreNodal
-            ? FlattenRows(displayValues)
-            : CreateTetraConductivity(displayValues);
-        var triangleDisplayValues = valuesAreNodal
-            ? ProjectNodalValuesToTriangles(displayValues, triangles)
-            : displayValues;
-
-        return new LayeredPseudo3dVolume(
-            lower.SetLabel,
-            upper.SetLabel,
-            lower.AcquiredAt,
-            upper.AcquiredAt,
-            (upper.AcquiredAt - lower.AcquiredAt).Duration(),
-            normalizedHeight,
-            displayLayerZ,
-            sourceNodes,
-            triangles,
-            nodeCoords3d,
-            tetraConnectivity,
-            conductivity,
-            triangleDisplayValues,
-            lower.Result.ReconstructionScaleStatus,
-            lower.Result.ReconstructionScaleProvenance,
-            LayeredPseudo3dVolume.LinearAlgorithmId,
-            AlgorithmProvenance: "display_only=true;true_3d_cem_inverse=false;synthetic_cross_plane_voltage=false",
-            FallbackReason: fallbackReason);
-    }
 
     public static Pseudo3dKrigingRequest CreateKrigingRequest(
         LayeredPseudo3dSource lower,
@@ -567,24 +480,6 @@ public static class LayeredPseudo3dInterpolator
         return output;
     }
 
-    private static double[,] InterpolateDisplayValues(
-        IReadOnlyList<double> lower,
-        IReadOnlyList<double> upper,
-        int displayLayers)
-    {
-        var output = new double[displayLayers, lower.Count];
-        for (var layer = 0; layer < displayLayers; layer++)
-        {
-            var fraction = (double)layer / (displayLayers - 1);
-            for (var valueIndex = 0; valueIndex < lower.Count; valueIndex++)
-            {
-                output[layer, valueIndex] = lower[valueIndex] +
-                    ((upper[valueIndex] - lower[valueIndex]) * fraction);
-            }
-        }
-
-        return output;
-    }
 
     private static double[,] ExtrudeNodes(double[,] sourceNodes, IReadOnlyList<double> displayLayerZ)
     {
