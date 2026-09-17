@@ -7,13 +7,13 @@ namespace EitHost.App.ViewModels.Workspaces;
 
 internal sealed record RealtimeReconstructionCallbacks(
     Action<string> Diagnostic,
-    Action<string, string?, string?, string?, string?> PublishQualityAxes,
-    Action<string, string> PublishReconstructionActivity,
-    Action<string, RealtimeReconstructionResult, DateTimeOffset> PublishPseudo3dLayer,
-    Action<string, RealtimeReconstructionResult, double, RealtimeRunState> PublishRoiMeasurement,
-    Action<string> PublishProvisionalRoiUnavailable,
+    Action<string, string?, string?, string?, string?, RealtimeRunState, int, int> PublishQualityAxes,
+    Action<string, string, RealtimeRunState, int, int> PublishReconstructionActivity,
+    Action<string, RealtimeReconstructionResult, DateTimeOffset, RealtimeRunState, int, int> PublishPseudo3dLayer,
+    Action<string, RealtimeReconstructionResult, double, RealtimeRunState, int, int, string> PublishRoiMeasurement,
+    Action<string, RealtimeRunState, int, int> PublishProvisionalRoiUnavailable,
     Action<string> QueueLog,
-    Action<IReadOnlyList<string>, string?> PublishUi,
+    Action<RealtimeRunState, int, int, IReadOnlyList<string>, string?> PublishUi,
     Func<RealtimeRunState, bool> ShouldRenderBoundaryFit,
     Func<RealtimeRunState, bool> ShouldRenderImage,
     Func<RealtimeRunState, bool> ShouldPublishStatus);
@@ -81,6 +81,9 @@ internal sealed class RealtimeReconstructionController
         bool publishRoiMeasurement,
         CancellationToken cancellationToken)
     {
+        var dynamicGeneration = state.DynamicKalmanGeneration;
+        var referenceEpoch = state.ReferenceEpoch;
+        var referenceLockKind = state.ActiveReferenceLockKind;
         var timeout = GetRequestTimeout(
             Volatile.Read(ref state.ReconstructionFrames),
             config.EnableDynamicKalman &&
@@ -93,7 +96,6 @@ internal sealed class RealtimeReconstructionController
             : "manual-cancel-only";
         try
         {
-            var dynamicGeneration = state.DynamicKalmanGeneration;
             if (ShouldLogMilestone(block.BlockNumber))
             {
                 callbacks.Diagnostic(
@@ -109,7 +111,9 @@ internal sealed class RealtimeReconstructionController
                 string.Equals(config.DynamicKalmanMode, "auto", StringComparison.Ordinal)
                     ? "fast_image"
                     : config.DynamicKalmanMode;
-            var dynamicKalman = config.EnableDynamicKalman && !degradedDemodulation
+            var holdDynamic = boundaryChangeDecision is not null &&
+                EcdCwrBoundaryChangeReconstructionDisposition.FromDecision(boundaryChangeDecision).HoldDynamicState;
+            var dynamicKalman = config.EnableDynamicKalman && !degradedDemodulation && !holdDynamic
                 ? new RealtimeDynamicKalmanOptions(
                     sessionId: $"{config.ImagingRunId:N}:ref{dynamicGeneration}",
                     fingerprint: FormattableString.Invariant(
@@ -160,7 +164,6 @@ internal sealed class RealtimeReconstructionController
 
             if (result.Succeeded)
             {
-                Volatile.Write(ref state.BackendSessionWarmupPending, false);
                 try
                 {
                     await HandleSuccessAsync(
@@ -180,6 +183,8 @@ internal sealed class RealtimeReconstructionController
                         degradedStatus,
                         publishRoiMeasurement,
                         dynamicGeneration,
+                        referenceEpoch,
+                        referenceLockKind,
                         dynamicKalman,
                         acquiredAt,
                         result).ConfigureAwait(false);
@@ -203,18 +208,52 @@ internal sealed class RealtimeReconstructionController
             }
 
             var error = result.ErrorMessage ?? "unknown reconstruction failure";
+            if (!IsCurrentReconstruction(state, dynamicGeneration, referenceEpoch, block.BlockNumber, "failure"))
+            {
+                return;
+            }
+
             await persistence.RecordReconstructionFailureAsync(config, state, block, error).ConfigureAwait(false);
-            RegisterFailure(state, error);
-            callbacks.PublishReconstructionActivity(config.SetLabel, $"重构状态：失败 · {error}");
+            if (!TryRegisterFailure(state, dynamicGeneration, referenceEpoch, error, out var failures))
+            {
+                LogStaleReconstruction(config.SetLabel, block.BlockNumber, dynamicGeneration, referenceEpoch, "failure-after-persistence", state);
+                return;
+            }
+
+            var suspended = failures >= MaxConsecutiveFailures;
+            if (!IsCurrentReconstruction(state, dynamicGeneration, referenceEpoch, block.BlockNumber, "failure-activity"))
+            {
+                return;
+            }
+
+            callbacks.PublishReconstructionActivity(
+                config.SetLabel,
+                suspended ? $"重构状态：已暂停 · {error}" : $"重构状态：失败 · {error}",
+                state,
+                dynamicGeneration,
+                referenceEpoch);
+            if (!IsCurrentReconstruction(state, dynamicGeneration, referenceEpoch, block.BlockNumber, "failure-quality"))
+            {
+                return;
+            }
+
             callbacks.PublishQualityAxes(
                 config.SetLabel,
                 null,
                 null,
-                $"重构质量：失败 · {error}",
-                "ROI 就绪：否 · 当前目标重构失败");
-            callbacks.PublishUi(
-                [$"{DateTime.Now:HH:mm:ss} {config.SetLabel} recon failed {error}"],
-                null);
+                suspended ? $"重构质量：已暂停 · {error}" : $"重构质量：失败 · {error}",
+                "ROI 就绪：否 · 当前目标重构失败",
+                state,
+                dynamicGeneration,
+                referenceEpoch);
+            PublishFailureUi(
+                config.SetLabel,
+                state,
+                dynamicGeneration,
+                referenceEpoch,
+                $"{DateTime.Now:HH:mm:ss} {config.SetLabel} recon failed {error}",
+                failures,
+                $"{config.SetLabel} 连续 {failures} 次重构失败，已暂停重构；采集、解调和参考稳定性继续运行。");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -228,7 +267,9 @@ internal sealed class RealtimeReconstructionController
                 block,
                 "reconstruction timeout",
                 timeout,
-                waitTimeout: false).ConfigureAwait(false);
+                waitTimeout: false,
+                dynamicGeneration,
+                referenceEpoch).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
@@ -238,23 +279,56 @@ internal sealed class RealtimeReconstructionController
                 block,
                 "reconstruction wait timeout",
                 timeout,
-                waitTimeout: true).ConfigureAwait(false);
+                waitTimeout: true,
+                dynamicGeneration,
+                referenceEpoch).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            var failures = RegisterFailure(state, ex.Message);
+            if (!IsCurrentReconstruction(state, dynamicGeneration, referenceEpoch, block.BlockNumber, "exception"))
+            {
+                return;
+            }
+
             await persistence.RecordReconstructionFailureAsync(config, state, block, ex.Message).ConfigureAwait(false);
+            if (!TryRegisterFailure(state, dynamicGeneration, referenceEpoch, ex.Message, out var failures))
+            {
+                LogStaleReconstruction(config.SetLabel, block.BlockNumber, dynamicGeneration, referenceEpoch, "exception-after-persistence", state);
+                return;
+            }
+
             callbacks.Diagnostic(
                 $"{config.SetLabel} reconstruction exception block={block.BlockNumber} failures={failures}: {ex}");
-            callbacks.PublishReconstructionActivity(config.SetLabel, $"重构状态：异常 · {ex.Message}");
+            if (!IsCurrentReconstruction(state, dynamicGeneration, referenceEpoch, block.BlockNumber, "exception-activity"))
+            {
+                return;
+            }
+
+            callbacks.PublishReconstructionActivity(
+                config.SetLabel,
+                $"重构状态：异常 · {ex.Message}",
+                state,
+                dynamicGeneration,
+                referenceEpoch);
+            if (!IsCurrentReconstruction(state, dynamicGeneration, referenceEpoch, block.BlockNumber, "exception-quality"))
+            {
+                return;
+            }
+
             callbacks.PublishQualityAxes(
                 config.SetLabel,
                 null,
                 null,
                 $"重构质量：失败 · {ex.Message}",
-                "ROI 就绪：否 · 当前目标重构异常");
+                "ROI 就绪：否 · 当前目标重构异常",
+                state,
+                dynamicGeneration,
+                referenceEpoch);
             PublishFailureUi(
                 config.SetLabel,
+                state,
+                dynamicGeneration,
+                referenceEpoch,
                 $"{DateTime.Now:HH:mm:ss} {config.SetLabel} recon exception {ex.Message}",
                 failures,
                 $"{config.SetLabel} 连续 {failures} 次重构异常，已暂停重构；采集和解调继续运行。");
@@ -278,21 +352,34 @@ internal sealed class RealtimeReconstructionController
         string? degradedStatus,
         bool publishRoiMeasurement,
         int dynamicGeneration,
+        int referenceEpoch,
+        string referenceLockKind,
         RealtimeDynamicKalmanOptions? dynamicKalman,
         DateTimeOffset acquiredAt,
         RealtimeReconstructionResult result)
     {
-        if (dynamicGeneration != state.DynamicKalmanGeneration)
+        if (!IsCurrentReconstruction(state, dynamicGeneration, referenceEpoch, result.BlockNumber, "success"))
         {
-            callbacks.Diagnostic(
-                $"{config.SetLabel} discard stale Kalman result block={result.BlockNumber} ref-generation={dynamicGeneration}->{state.DynamicKalmanGeneration}");
             return;
         }
 
+        var acceptedDynamicGeneration = dynamicGeneration;
+        var advancedGeneration = false;
         if (result.DynamicKalmanApplied &&
-            !ApplyDynamicKalmanResult(config, state, result, out result))
+            !ApplyDynamicKalmanResult(
+                config,
+                state,
+                dynamicGeneration,
+                referenceEpoch,
+                result,
+                out result,
+                out advancedGeneration))
         {
             return;
+        }
+        if (advancedGeneration)
+        {
+            acceptedDynamicGeneration++;
         }
 
         // Bind and verify the one DataRoot-wide canonical mesh before this result can
@@ -303,16 +390,86 @@ internal sealed class RealtimeReconstructionController
             result,
             acquiredAt).ConfigureAwait(false);
 
-        UpdateContactSubspaceEvidence(state, result);
-        state.RoiGeometry = new RealtimeRoiGeometry(
-            result.NodeCoords,
-            result.CellConnectivity,
-            result.GetMeshIndexMetadata());
-        var completedFrames = state.RecordReconstructionSuccess(result.BackendElapsed, degradedDemodulation);
+        if (!IsCurrentReconstruction(state, acceptedDynamicGeneration, referenceEpoch, result.BlockNumber, "success-after-mesh"))
+        {
+            return;
+        }
+
         var imageQualityScore = RefineImageQuality(contactResult, result);
         if (imageQualityCap is { } qualityCap)
         {
             imageQualityScore = Math.Min(imageQualityScore ?? qualityCap, qualityCap);
+        }
+
+        result = result with
+        {
+            ImageQualityScore = imageQualityScore,
+            TimeDivision = block.TimeDivision is { } stamp ? stamp with
+            {
+                TrustedZeroDifference = boundaryChangeDecision is not null &&
+                    EcdCwrBoundaryChangeReconstructionDisposition.FromDecision(boundaryChangeDecision).UseZeroDifferenceInput
+            } : null
+        };
+
+        var persistedLiveEvidence = await persistence.PersistReconstructionResultAsync(
+            config,
+            state,
+            referenceEpoch,
+            block,
+            result,
+            imageQualityScore,
+            reference,
+            target,
+            measurementWeights,
+            weightPolicyVersion,
+            dynamicKalman).ConfigureAwait(false);
+        if (!state.TryRecordReconstructionSuccess(
+                acceptedDynamicGeneration,
+                referenceEpoch,
+                result.BackendElapsed,
+                degradedDemodulation,
+                out var completedFrames))
+        {
+            LogStaleReconstruction(
+                config.SetLabel,
+                result.BlockNumber,
+                acceptedDynamicGeneration,
+                referenceEpoch,
+                "success-after-persistence",
+                state);
+            return;
+        }
+        if (!state.TryCommitReconstructionState(
+                acceptedDynamicGeneration,
+                referenceEpoch,
+                () =>
+                {
+                    if (result.DynamicKalmanApplied && !advancedGeneration)
+                    {
+                        state.DynamicKalmanResetPending = false;
+                    }
+
+                    Volatile.Write(ref state.BackendSessionWarmupPending, false);
+                    UpdateContactSubspaceEvidence(state, result);
+                    state.RoiGeometry = new RealtimeRoiGeometry(
+                        result.NodeCoords,
+                        result.CellConnectivity,
+                        result.GetMeshIndexMetadata());
+                }))
+        {
+            LogStaleReconstruction(
+                config.SetLabel,
+                result.BlockNumber,
+                acceptedDynamicGeneration,
+                referenceEpoch,
+                "success-before-presentation",
+                state);
+            return;
+        }
+
+        if (!IsCurrentReconstruction(state, acceptedDynamicGeneration, referenceEpoch, result.BlockNumber, "quality-presentation"))
+        {
+            return;
         }
 
         callbacks.PublishQualityAxes(
@@ -324,20 +481,22 @@ internal sealed class RealtimeReconstructionController
                 : imageQualityScore is { } quality
                     ? $"重构质量：成功 · Q={quality:F3} · condition={result.WeightedSystemConditionNumber:G3}"
                     : $"重构质量：成功 · condition={result.WeightedSystemConditionNumber:G3}",
-            null);
-        callbacks.PublishPseudo3dLayer(config.SetLabel, result, acquiredAt);
-
-        var persistedLiveEvidence = await persistence.PersistReconstructionResultAsync(
-            config,
+            null,
             state,
-            block,
+            acceptedDynamicGeneration,
+            referenceEpoch);
+        if (!IsCurrentReconstruction(state, acceptedDynamicGeneration, referenceEpoch, result.BlockNumber, "pseudo3d-presentation"))
+        {
+            return;
+        }
+
+        callbacks.PublishPseudo3dLayer(
+            config.SetLabel,
             result,
-            imageQualityScore,
-            reference,
-            target,
-            measurementWeights,
-            weightPolicyVersion,
-            dynamicKalman).ConfigureAwait(false);
+            acquiredAt,
+            state,
+            acceptedDynamicGeneration,
+            referenceEpoch);
         var renderBoundaryFit = callbacks.ShouldRenderBoundaryFit(state);
         var renderImage = callbacks.ShouldRenderImage(state);
         if ((renderBoundaryFit || renderImage) &&
@@ -351,7 +510,8 @@ internal sealed class RealtimeReconstructionController
                 completedFrames,
                 renderBoundaryFit,
                 renderImage,
-                state.ReferenceEpoch,
+                referenceEpoch,
+                acceptedDynamicGeneration,
                 degradedStatus,
                 boundaryChangeDecision,
                 PersistedLiveEvidence: persistedLiveEvidence)) != true)
@@ -365,27 +525,48 @@ internal sealed class RealtimeReconstructionController
                 config.SetLabel,
                 result,
                 imageQualityScore ?? block.QualityWeight,
-                state);
+                state,
+                referenceEpoch,
+                acceptedDynamicGeneration,
+                referenceLockKind);
         }
-        else
+        else if (IsCurrentReconstruction(
+                     state,
+                     acceptedDynamicGeneration,
+                     referenceEpoch,
+                     result.BlockNumber,
+                     "provisional-roi-presentation"))
         {
-            callbacks.PublishProvisionalRoiUnavailable(config.SetLabel);
+            callbacks.PublishProvisionalRoiUnavailable(
+                config.SetLabel,
+                state,
+                acceptedDynamicGeneration,
+                referenceEpoch);
         }
 
-        if (result.OutputPersisted && callbacks.ShouldPublishStatus(state))
+        if (result.OutputPersisted &&
+            callbacks.ShouldPublishStatus(state))
         {
-            callbacks.QueueLog(
-                $"{DateTime.Now:HH:mm:ss} {config.SetLabel} recon block {result.BlockNumber} {result.BackendElapsed.TotalMilliseconds:F0}ms {result.OutputHdf5Path}");
+            callbacks.PublishUi(
+                state,
+                acceptedDynamicGeneration,
+                referenceEpoch,
+                [$"{DateTime.Now:HH:mm:ss} {config.SetLabel} recon block {result.BlockNumber} {result.BackendElapsed.TotalMilliseconds:F0}ms {result.OutputHdf5Path}"],
+                null);
         }
     }
 
     private bool ApplyDynamicKalmanResult(
         RealtimeImagingRunConfig config,
         RealtimeRunState state,
+        int expectedDynamicGeneration,
+        int expectedReferenceEpoch,
         RealtimeReconstructionResult current,
-        out RealtimeReconstructionResult result)
+        out RealtimeReconstructionResult result,
+        out bool advancedGeneration)
     {
         result = current;
+        advancedGeneration = false;
         if (result.DynamicKalmanTotalLatencyFrames != 2)
         {
             throw new InvalidDataException(
@@ -403,9 +584,22 @@ internal sealed class RealtimeReconstructionController
                 var raw = result.RawConductivity;
                 if (raw is null || raw.Length != result.Conductivity.Length || raw.Any(value => !double.IsFinite(value)))
                 {
-                    state.DynamicKalmanForceSafeImage = true;
-                    state.DynamicKalmanGeneration++;
-                    state.DynamicKalmanResetPending = true;
+                    if (!state.TryAdvanceDynamicKalmanGeneration(
+                            expectedDynamicGeneration,
+                            expectedReferenceEpoch,
+                            forceSafeImage: true,
+                            out _))
+                    {
+                        LogStaleReconstruction(
+                            config.SetLabel,
+                            result.BlockNumber,
+                            expectedDynamicGeneration,
+                            expectedReferenceEpoch,
+                            "kalman-malformed",
+                            state);
+                        return false;
+                    }
+
                     Interlocked.Increment(ref state.SkippedReconstructionBlocks);
                     callbacks.Diagnostic(
                         $"{config.SetLabel} Kalman guard dropped malformed block={result.BlockNumber} reason={stability.Reason}; next=fast_image");
@@ -425,13 +619,23 @@ internal sealed class RealtimeReconstructionController
 
         if (forceSafeImage)
         {
-            state.DynamicKalmanForceSafeImage = true;
-            state.DynamicKalmanGeneration++;
-            state.DynamicKalmanResetPending = true;
-        }
-        else
-        {
-            state.DynamicKalmanResetPending = false;
+            if (!state.TryAdvanceDynamicKalmanGeneration(
+                    expectedDynamicGeneration,
+                    expectedReferenceEpoch,
+                    forceSafeImage: true,
+                    out _))
+            {
+                LogStaleReconstruction(
+                    config.SetLabel,
+                    result.BlockNumber,
+                    expectedDynamicGeneration,
+                    expectedReferenceEpoch,
+                    "kalman-fallback",
+                    state);
+                return false;
+            }
+
+            advancedGeneration = true;
         }
 
         return true;
@@ -443,49 +647,148 @@ internal sealed class RealtimeReconstructionController
         RealtimeDemodulatedBlock block,
         string persistenceMessage,
         TimeSpan timeout,
-        bool waitTimeout)
+        bool waitTimeout,
+        int dynamicGeneration,
+        int referenceEpoch)
     {
-        Volatile.Write(ref state.BackendSessionWarmupPending, true);
-        var failures = RegisterFailure(state, "reconstruction timeout");
+        if (!IsCurrentReconstruction(state, dynamicGeneration, referenceEpoch, block.BlockNumber, "timeout"))
+        {
+            return;
+        }
+
         await persistence.RecordReconstructionFailureAsync(config, state, block, persistenceMessage).ConfigureAwait(false);
+        if (!TryRegisterFailure(state, dynamicGeneration, referenceEpoch, "reconstruction timeout", out var failures))
+        {
+            LogStaleReconstruction(config.SetLabel, block.BlockNumber, dynamicGeneration, referenceEpoch, "timeout-after-persistence", state);
+            return;
+        }
+
+        if (!state.TryCommitReconstructionState(
+                dynamicGeneration,
+                referenceEpoch,
+                () => Volatile.Write(ref state.BackendSessionWarmupPending, true)))
+        {
+            LogStaleReconstruction(
+                config.SetLabel,
+                block.BlockNumber,
+                dynamicGeneration,
+                referenceEpoch,
+                "timeout-before-presentation",
+                state);
+            return;
+        }
+
         callbacks.Diagnostic(
             $"{config.SetLabel} reconstruction{(waitTimeout ? " wait" : string.Empty)} timeout block={block.BlockNumber} failures={failures}");
+        if (!IsCurrentReconstruction(state, dynamicGeneration, referenceEpoch, block.BlockNumber, "timeout-activity"))
+        {
+            return;
+        }
+
         callbacks.PublishReconstructionActivity(
             config.SetLabel,
-            $"重构状态：超时 · block {block.BlockNumber} 超过 {timeout.TotalSeconds:F0}s");
+            $"重构状态：超时 · block {block.BlockNumber} 超过 {timeout.TotalSeconds:F0}s",
+            state,
+            dynamicGeneration,
+            referenceEpoch);
+        if (!IsCurrentReconstruction(state, dynamicGeneration, referenceEpoch, block.BlockNumber, "timeout-quality"))
+        {
+            return;
+        }
+
         callbacks.PublishQualityAxes(
             config.SetLabel,
             null,
             null,
             waitTimeout ? "重构质量：失败 · 后端等待超时" : "重构质量：失败 · 后端超时",
-            "ROI 就绪：否 · 当前目标重构超时");
+            "ROI 就绪：否 · 当前目标重构超时",
+            state,
+            dynamicGeneration,
+            referenceEpoch);
         PublishFailureUi(
             config.SetLabel,
+            state,
+            dynamicGeneration,
+            referenceEpoch,
             $"{DateTime.Now:HH:mm:ss} {config.SetLabel} recon timeout block {block.BlockNumber}",
             failures,
             $"{config.SetLabel} 连续 {failures} 次重构超时，已暂停重构；采集和解调继续运行。");
     }
 
-    private int RegisterFailure(RealtimeRunState state, string message)
+    private bool TryRegisterFailure(
+        RealtimeRunState state,
+        int dynamicGeneration,
+        int referenceEpoch,
+        string message,
+        out int failures)
     {
-        var failures = state.RecordReconstructionFailure(message, MaxConsecutiveFailures);
+        if (!state.TryRecordReconstructionFailure(
+                dynamicGeneration,
+                referenceEpoch,
+                message,
+                MaxConsecutiveFailures,
+                out failures))
+        {
+            return false;
+        }
+
         if (state.ReconstructionSuspended)
         {
             callbacks.Diagnostic($"{state.SetLabel} reconstruction suspended after {failures} failures: {message}");
         }
 
-        return failures;
+        return true;
     }
 
-    private void PublishFailureUi(string setLabel, string logLine, int failures, string status)
+    private bool IsCurrentReconstruction(
+        RealtimeRunState state,
+        int dynamicGeneration,
+        int referenceEpoch,
+        int blockNumber,
+        string stage)
+    {
+        if (state.IsReconstructionContextCurrent(dynamicGeneration, referenceEpoch))
+        {
+            return true;
+        }
+
+        LogStaleReconstruction(state.SetLabel, blockNumber, dynamicGeneration, referenceEpoch, stage, state);
+        return false;
+    }
+
+    private void LogStaleReconstruction(
+        string setLabel,
+        int blockNumber,
+        int dynamicGeneration,
+        int referenceEpoch,
+        string stage,
+        RealtimeRunState state)
+    {
+        callbacks.Diagnostic(
+            $"{setLabel} discard stale reconstruction block={blockNumber} stage={stage} " +
+            $"generation={dynamicGeneration}->{state.DynamicKalmanGeneration} " +
+            $"reference-epoch={referenceEpoch}->{state.ReferenceEpoch} invalidated={state.ReferenceInvalidated}");
+    }
+
+    private void PublishFailureUi(
+        string setLabel,
+        RealtimeRunState state,
+        int dynamicGeneration,
+        int referenceEpoch,
+        string logLine,
+        int failures,
+        string status)
     {
         if (failures < MaxConsecutiveFailures)
         {
-            callbacks.PublishUi([logLine], null);
+            callbacks.PublishUi(state, dynamicGeneration, referenceEpoch, [logLine], null);
             return;
         }
 
         callbacks.PublishUi(
+            state,
+            dynamicGeneration,
+            referenceEpoch,
             [logLine, $"{DateTime.Now:HH:mm:ss} {setLabel} recon circuit breaker pause"],
             status);
     }

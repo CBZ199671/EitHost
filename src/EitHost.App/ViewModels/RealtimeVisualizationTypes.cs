@@ -96,6 +96,7 @@ internal sealed record RealtimeVisualizationWorkItem(
     bool RenderBoundaryFit,
     bool RenderImage,
     int ReferenceEpoch,
+    int DynamicGeneration,
     string? DegradedStatus = null,
     EcdCwrBoundaryChangeDecision? BoundaryChangeDecision = null,
     RealtimeNeutralImagePresentation? NeutralPresentation = null,

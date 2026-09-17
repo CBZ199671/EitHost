@@ -5,9 +5,9 @@ using Microsoft.Data.Sqlite;
 
 namespace EitHost.Core.Storage.Catalog;
 
-public sealed class ExperimentCatalog
+public sealed partial class ExperimentCatalog
 {
-    public const int CurrentSchemaVersion = 10;
+    public const int CurrentSchemaVersion = 11;
     public const string RecordingStatus = "recording";
     public const string CompletedStatus = "completed";
     public const string InterruptedStatus = "interrupted";
@@ -326,6 +326,14 @@ public sealed class ExperimentCatalog
                 ON reconstruction_lane_frames(experiment_run_id, lane, revision_id, sequence_number);
             CREATE INDEX IF NOT EXISTS idx_realtime_roi_evidence_sequence
                 ON realtime_roi_evidence(experiment_run_id, revision_id, acquired_at_utc, source_block_number);
+            """);
+        ExecuteNonQuery(connection, """
+            CREATE TABLE IF NOT EXISTS pseudo3d_members (
+                experiment_run_id TEXT PRIMARY KEY REFERENCES experiment_runs(experiment_run_id) ON DELETE CASCADE,
+                group_id TEXT NOT NULL,
+                slot INTEGER NOT NULL CHECK (slot IN (0,1)),
+                UNIQUE(group_id, slot)
+            );
             """);
         SetUserVersion(connection, CurrentSchemaVersion);
         transaction.Commit();
@@ -648,7 +656,13 @@ public sealed class ExperimentCatalog
         return reader.Read() ? ReadReconstructionRevision(reader) : null;
     }
 
-    public void RecordReconstructionLaneFrame(ReconstructionLaneFrameCatalogRecord frame)
+    public void RecordReconstructionLaneFrame(ReconstructionLaneFrameCatalogRecord frame) =>
+        RecordReconstructionLaneFrameCore(frame, append: false);
+
+    public void AppendReconstructionLaneFrame(ReconstructionLaneFrameCatalogRecord frame) =>
+        RecordReconstructionLaneFrameCore(frame, append: true);
+
+    private void RecordReconstructionLaneFrameCore(ReconstructionLaneFrameCatalogRecord frame, bool append)
     {
         ArgumentNullException.ThrowIfNull(frame);
         ValidateReconstructionLaneFrame(frame);
@@ -676,6 +690,30 @@ public sealed class ExperimentCatalog
                 StringComparison.Ordinal))
         {
             throw new InvalidDataException("Frame algorithm fingerprint does not match its revision.");
+        }
+
+        if (append)
+        {
+            using var sequence = connection.CreateCommand();
+            sequence.CommandText =
+                """
+                SELECT CASE WHEN EXISTS(
+                    SELECT 1 FROM reconstruction_lane_frames
+                    WHERE experiment_run_id = $run AND lane = $lane AND revision_id = $revision
+                      AND source_block_number = $block)
+                THEN NULL ELSE COALESCE((
+                    SELECT sequence_number FROM reconstruction_lane_frames
+                    WHERE experiment_run_id = $run AND lane = $lane AND revision_id = $revision
+                    ORDER BY sequence_number DESC LIMIT 1), 0) + 1 END;
+                """;
+            sequence.Parameters.AddWithValue("$run", frame.ExperimentRunId.ToString("D"));
+            sequence.Parameters.AddWithValue("$lane", frame.Lane);
+            sequence.Parameters.AddWithValue("$revision", frame.RevisionId);
+            sequence.Parameters.AddWithValue("$block", frame.SourceBlockNumber);
+            var next = sequence.ExecuteScalar();
+            if (next is null or DBNull)
+                return;
+            frame = frame with { SequenceNumber = checked(Convert.ToInt32(next)) };
         }
 
         ExecuteNonQuery(
@@ -729,12 +767,30 @@ public sealed class ExperimentCatalog
             ("$source_start_sample_index", frame.SourceStartSampleIndex),
             ("$source_end_sample_index", frame.SourceEndSampleIndex),
             ("$result_hash", frame.ResultHash));
-        RefreshReconstructionRevisionCounts(
-            connection,
-            frame.ExperimentRunId,
-            frame.Lane,
-            frame.RevisionId,
-            frame.ProcessedAt);
+        if (append)
+        {
+            ExecuteNonQuery(connection,
+                """
+                UPDATE reconstruction_revisions
+                SET terminal_outcome_count = terminal_outcome_count + 1,
+                    reconstructed_count = reconstructed_count + $reconstructed,
+                    neutral_count = neutral_count + $neutral,
+                    excluded_count = excluded_count + $excluded,
+                    updated_at_utc = $updated
+                WHERE experiment_run_id = $run AND lane = $lane AND revision_id = $revision;
+                """,
+                ("$reconstructed", frame.Outcome == ReconstructionFrameOutcome.Reconstructed ? 1 : 0),
+                ("$neutral", frame.Outcome == ReconstructionFrameOutcome.Neutral ? 1 : 0),
+                ("$excluded", frame.Outcome is ReconstructionFrameOutcome.ExcludedNoReference or
+                    ReconstructionFrameOutcome.ExcludedInvalid or ReconstructionFrameOutcome.ExcludedDiscontinuity ? 1 : 0),
+                ("$updated", Format(frame.ProcessedAt)),
+                ("$run", frame.ExperimentRunId.ToString("D")), ("$lane", frame.Lane), ("$revision", frame.RevisionId));
+        }
+        else
+        {
+            RefreshReconstructionRevisionCounts(connection, frame.ExperimentRunId,
+                frame.Lane, frame.RevisionId, frame.ProcessedAt);
+        }
         transaction.Commit();
     }
 

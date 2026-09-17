@@ -142,6 +142,11 @@ internal sealed class ExperimentRunLifecycleController
             runDirectory));
         state.ExperimentCatalogRunStarted = true;
         state.ExperimentStartedAt = startedAt;
+        if (config.TimeDivisionGroup is { } group)
+        {
+            experimentCatalog.RegisterPseudo3dMember(config.ImagingRunId, group.SessionId, group.GetSlot(config.SetLabel));
+            callbacks.RefreshRuns();
+        }
         callbacks.BeginDiagnosticMirror(config.ImagingRunId, runDirectory);
         callbacks.Diagnostic(
             $"{config.SetLabel} experiment begin id={config.ImagingRunId:D} directory={runDirectory}");
@@ -164,7 +169,7 @@ internal sealed class ExperimentRunLifecycleController
                 ? "not_requested"
                 : failure is not null
                     ? "incomplete"
-                    : state.TotalRawSamples == 0
+                    : coverage.RawSampleRows == 0
                         ? "empty"
                         : "complete";
             var demodStatus = !config.PersistImagingFrames

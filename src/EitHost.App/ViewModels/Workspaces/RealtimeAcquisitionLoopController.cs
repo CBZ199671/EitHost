@@ -23,7 +23,8 @@ internal sealed record RealtimeAcquisitionLoopCallbacks(
     Func<Task> DrainDerivedPersistence,
     Func<string, string, Func<Task<DdsCommandResult>>, Task<DdsCommandResult>> SendDdsCommand,
     Action<RealtimeImagingRunConfig, RealtimeRunState, Exception?> CompleteExperimentRun,
-    Action<RealtimeImagingRunConfig, RealtimeRunState> CompleteUi);
+    Action<RealtimeImagingRunConfig, RealtimeRunState> CompleteUi,
+    Func<RealtimeImagingRunConfig, RealtimeRunState, IAsyncEnumerable<RealtimeDemodulatedBlock>, CancellationToken, Task>? ConsumeBlockStream = null);
 
 internal sealed class RealtimeAcquisitionLoopController
 {
@@ -48,6 +49,11 @@ internal sealed class RealtimeAcquisitionLoopController
         RealtimeRunState state,
         CancellationToken cancellationToken)
     {
+        if (config.TimeDivisionGroup is { } group)
+        {
+            await group.RunMemberAsync(config, state, usb2070NativeApi, callbacks, cancellationToken).ConfigureAwait(false);
+            return;
+        }
         Usb2070Session? session = null;
         DdsSerialPortTransport? ddsTransport = null;
         RealtimeDemodulationPipeline? pipeline = null;

@@ -18,6 +18,20 @@ public partial class MainWindow : Window
     private const int DwmColorNone = unchecked((int)0xFFFFFFFE);
     private static readonly TimeSpan MainWindowShutdownWait = TimeSpan.FromMilliseconds(1000);
 
+    // A 1080p laptop at 125-150% scaling arranges the shell at roughly 1536x824 or
+    // 1280x672 DIP. Below this height the 实测 workbench trades prose rows and chrome
+    // height for plot area so the four canvases stay near their 520x220 aspect.
+    internal const double ShortLayoutHeightThreshold = 880.0;
+
+    private static readonly DependencyPropertyKey IsShortLayoutPropertyKey =
+        DependencyProperty.RegisterReadOnly(
+            nameof(IsShortLayout),
+            typeof(bool),
+            typeof(MainWindow),
+            new PropertyMetadata(false));
+
+    public static readonly DependencyProperty IsShortLayoutProperty = IsShortLayoutPropertyKey.DependencyProperty;
+
     private readonly MainWindowViewModel viewModel;
     private readonly WindowLanguageController languageController;
     private IDisposable? windowIdentityRegistration;
@@ -49,6 +63,8 @@ public partial class MainWindow : Window
         languageController = new WindowLanguageController(this);
         UpdateLanguageMenuSelection();
         ShowPage(NavRealtime);
+        ShellRoot.SizeChanged += ShellRoot_SizeChanged;
+        ApplyLayoutDensity(new Size(ShellRoot.ActualWidth, ShellRoot.ActualHeight));
         Closing += MainWindow_Closing;
     }
 
@@ -248,6 +264,24 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// True while the shell is arranged short enough that the 实测 plot cards must
+    /// give up their prose rows. Read from XAML triggers, never set from markup.
+    /// </summary>
+    public bool IsShortLayout => (bool)GetValue(IsShortLayoutProperty);
+
+    private void ShellRoot_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        ApplyLayoutDensity(e.NewSize);
+    }
+
+    // Density follows the arranged shell, not the monitor: an unmaximized window on a
+    // 4K panel is still short, and the layout tests measure the shell root directly.
+    private void ApplyLayoutDensity(Size shell)
+    {
+        SetValue(IsShortLayoutPropertyKey, shell.Height > 0.0 && shell.Height < ShortLayoutHeightThreshold);
+    }
+
+    /// <summary>
     /// Reports the space the conductivity surface actually occupies so the renderer rasterises at
     /// that resolution instead of upscaling a fixed square. The Viewbox sizes itself from its
     /// parent, so feeding its measurement back cannot drive a layout loop.
@@ -261,6 +295,9 @@ public partial class MainWindow : Window
 
         viewModel.VisualizationWorkspace.ApplyImageSurfaceSize(
             Math.Min(surface.ActualWidth, surface.ActualHeight));
+        var dpi = System.Windows.Media.VisualTreeHelper.GetDpi(surface);
+        viewModel.UpdatePseudo3dRenderSize((int)Math.Ceiling(
+            Math.Min(surface.ActualWidth, surface.ActualHeight) * dpi.DpiScaleX));
     }
 
     private void RoiCanvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)

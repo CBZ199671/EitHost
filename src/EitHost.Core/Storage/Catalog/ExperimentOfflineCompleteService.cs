@@ -550,6 +550,10 @@ public sealed class ExperimentOfflineCompleteService
                     DetrendNoiseModel: string.Equals(
                         epoch.NoiseEstimationPolicy,
                         "linear_detrended_residual-v1",
+                        StringComparison.Ordinal),
+                    UseShortTermNoiseModel: string.Equals(
+                        epoch.NoiseEstimationPolicy,
+                        EcdCwrBoundaryNoiseModelBuilder.ShortTermResidualPolicy,
                         StringComparison.Ordinal)));
             if (rebuilt.NoiseModel is not { } noiseModel ||
                 !VectorsNearlyEqual(rebuilt.Voltage208, epoch.ReferenceAmplitude208) ||

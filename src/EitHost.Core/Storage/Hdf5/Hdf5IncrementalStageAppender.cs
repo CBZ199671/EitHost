@@ -17,6 +17,7 @@ internal static class Hdf5IncrementalStageAppender
             ["demod"] = ["/demod", "/quality"],
             ["diagnostics"] = ["/diagnostics", "/replay_demod_override"],
             ["reference_candidates"] = ["/candidates"],
+            ["pseudo3d"] = ["/pseudo3d"],
             ["reconstruction"] =
             [
                 "/reconstruction",
@@ -717,7 +718,7 @@ internal static class Hdf5IncrementalStageAppender
                 (failedDuringOpen && AtomicFileCommitter.IsFileBlockedByTransientLease(
                     leaseProbePath,
                     leaseProbeAccess));
-        return AtomicFileCommitter.ExecuteWithTransientLeaseRetry(
+        return Hdf5FileAccess.ExecuteOpenWithTransientLeaseRetry(
             operation,
             () =>
             {
@@ -747,6 +748,8 @@ internal static class Hdf5IncrementalStageAppender
             EnsureSuccess(
                 H5P.set_fclose_degree(access, H5F.close_degree_t.STRONG),
                 $"set strong-close file access for {operation}");
+            if (OperatingSystem.IsWindows())
+                EnsureSuccess(H5P.set_fapl_sec2(access), $"select SEC2 file access for {operation}");
             try
             {
                 file = open(access);
@@ -758,6 +761,7 @@ internal static class Hdf5IncrementalStageAppender
                 throw;
             }
 
+            Hdf5WindowsFileHandle.PreventInheritance(file);
             return file;
         }
         catch (Exception ex)

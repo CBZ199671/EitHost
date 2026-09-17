@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace EitHost.Core.Reconstruction;
 
 public sealed record LayeredPseudo3dSource(
@@ -21,11 +23,32 @@ public sealed record LayeredPseudo3dVolume(
     double[,] DisplayLayerTriangleConductivity,
     string ReconstructionScaleStatus,
     string ReconstructionScaleProvenance,
-    string Algorithm)
+    string Algorithm,
+    double[,]? DisplayLayerTriangleRelativeVariance = null,
+    string AlgorithmProvenance = "",
+    string? FallbackReason = null)
 {
-    public const string AlgorithmId = "layered_2d_noser_rm_z_interpolated_tetra_v1";
+    public const string KrigingAlgorithmId = "quality_aware_anisotropic_universal_kriging_2p5d_v2";
+    public const string LinearAlgorithmId = "linear_z_between_2d_layers_v1";
+    public const string AlgorithmId = LinearAlgorithmId;
 
     public int DisplayLayerCount => DisplayLayerZ.Length;
+
+    public double? MeanRelativeVariance
+    {
+        get
+        {
+            var values = DisplayLayerTriangleRelativeVariance;
+            if (values is null)
+                return null;
+            if (values.Length == 0)
+                throw new InvalidOperationException("Sequence contains no elements");
+            var sum = 0.0;
+            foreach (double value in values)
+                sum += value;
+            return sum / values.Length;
+        }
+    }
 }
 
 public static class LayeredPseudo3dInterpolator
@@ -36,7 +59,8 @@ public static class LayeredPseudo3dInterpolator
         LayeredPseudo3dSource lower,
         LayeredPseudo3dSource upper,
         int displayLayers = 5,
-        double normalizedHeight = 2.0)
+        double normalizedHeight = 2.0,
+        string? fallbackReason = null)
     {
         ArgumentNullException.ThrowIfNull(lower);
         ArgumentNullException.ThrowIfNull(upper);
@@ -109,7 +133,250 @@ public static class LayeredPseudo3dInterpolator
             triangleDisplayValues,
             lower.Result.ReconstructionScaleStatus,
             lower.Result.ReconstructionScaleProvenance,
-            LayeredPseudo3dVolume.AlgorithmId);
+            LayeredPseudo3dVolume.LinearAlgorithmId,
+            AlgorithmProvenance: "display_only=true;true_3d_cem_inverse=false;synthetic_cross_plane_voltage=false",
+            FallbackReason: fallbackReason);
+    }
+
+    public static Pseudo3dKrigingRequest CreateKrigingRequest(
+        LayeredPseudo3dSource lower,
+        LayeredPseudo3dSource upper,
+        int displayLayers = 5,
+        double normalizedHeight = 2.0,
+        double axialRangeFactor = 1.0,
+        double spatialRangeFactor = 2.5,
+        int neighborhoodSize = 8)
+    {
+        ArgumentNullException.ThrowIfNull(lower);
+        ArgumentNullException.ThrowIfNull(upper);
+        ArgumentException.ThrowIfNullOrWhiteSpace(lower.SetLabel);
+        ArgumentException.ThrowIfNullOrWhiteSpace(upper.SetLabel);
+        if (string.Equals(lower.SetLabel, upper.SetLabel, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("Pseudo-3D Kriging requires two distinct set labels.");
+        }
+
+        if (displayLayers < 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(displayLayers));
+        }
+
+        if (!double.IsFinite(normalizedHeight) || normalizedHeight <= 0.0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(normalizedHeight));
+        }
+
+        if (!double.IsFinite(axialRangeFactor) || axialRangeFactor <= 0.0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(axialRangeFactor));
+        }
+
+        ValidateResult(lower.Result, nameof(lower));
+        ValidateResult(upper.Result, nameof(upper));
+        ValidateCompatibleScale(lower.Result, upper.Result);
+        ValidateCompatibleMeshes(lower.Result, upper.Result);
+
+        var sourceNodes = CopyFirstTwoColumns(lower.Result.NodeCoords);
+        var triangles = Triangulate(
+            lower.Result.CellConnectivity,
+            lower.Result.Conductivity,
+            sourceNodes.GetLength(0),
+            lower.Result.ParameterEntity,
+            out var lowerValues,
+            out var valuesAreNodal);
+        _ = Triangulate(
+            upper.Result.CellConnectivity,
+            upper.Result.Conductivity,
+            sourceNodes.GetLength(0),
+            upper.Result.ParameterEntity,
+            out var upperValues,
+            out var upperValuesAreNodal);
+        if (valuesAreNodal != upperValuesAreNodal || lowerValues.Length != upperValues.Length)
+        {
+            throw new InvalidDataException("Pseudo-3D layer conductivity representations do not match.");
+        }
+
+        var sourceZ = new[] { -0.5 * normalizedHeight, 0.5 * normalizedHeight };
+        var displayZ = CreateDisplayLayerZ(displayLayers, normalizedHeight);
+        var values = new double[2, lowerValues.Length];
+        for (var index = 0; index < lowerValues.Length; index++)
+        {
+            values[0, index] = lowerValues[index];
+            values[1, index] = upperValues[index];
+        }
+
+        var quality = new[]
+        {
+            EstimateLayerQuality(lower.Result),
+            EstimateLayerQuality(upper.Result)
+        };
+        var metadataJson = JsonSerializer.Serialize(new
+        {
+            request_source = "EitHost paired independent 2D reconstructions",
+            lower_set_label = lower.SetLabel,
+            upper_set_label = upper.SetLabel,
+            lower_block_number = lower.Result.BlockNumber,
+            upper_block_number = upper.Result.BlockNumber,
+            lower_acquired_at_utc = lower.AcquiredAt.ToUniversalTime(),
+            upper_acquired_at_utc = upper.AcquiredAt.ToUniversalTime(),
+            pair_skew_milliseconds = (upper.AcquiredAt - lower.AcquiredAt).Duration().TotalMilliseconds,
+            z_unit = "normalized_model_coordinate",
+            display_only = true,
+            true_3d_cem_inverse = false,
+            synthetic_cross_plane_voltage = false,
+            quality_policy = "image_quality_then_fit_and_dynamic_kalman_diagnostics_v1"
+        });
+        return new Pseudo3dKrigingRequest(
+            sourceNodes,
+            triangles,
+            values,
+            sourceZ,
+            displayZ,
+            quality,
+            valuesAreNodal ? ReconstructionParameterEntity.Node : ReconstructionParameterEntity.Cell,
+            axialRangeFactor,
+            spatialRangeFactor,
+            neighborhoodSize,
+            metadataJson);
+    }
+
+    public static LayeredPseudo3dVolume ComposeKriging(
+        LayeredPseudo3dSource lower,
+        LayeredPseudo3dSource upper,
+        Pseudo3dKrigingRequest request,
+        Pseudo3dKrigingResult result,
+        bool includeExportVolume = true)
+    {
+        ArgumentNullException.ThrowIfNull(lower);
+        ArgumentNullException.ThrowIfNull(upper);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(result);
+        ValidateResult(lower.Result, nameof(lower));
+        ValidateResult(upper.Result, nameof(upper));
+        ValidateCompatibleScale(lower.Result, upper.Result);
+        ValidateCompatibleMeshes(lower.Result, upper.Result);
+        ValidateKrigingResult(request, result);
+
+        var valuesAreNodal = string.Equals(
+            ReconstructionParameterEntity.Normalize(request.ParameterEntity),
+            ReconstructionParameterEntity.Node,
+            StringComparison.Ordinal);
+        var displayValues = result.DisplayLayerValues;
+        var displayVariance = result.RelativeVariance;
+        var nodeCoords3d = includeExportVolume ? ExtrudeNodes(request.NodeCoords, request.DisplayZ) : new double[0, 3];
+        var tetraConnectivity = includeExportVolume ? ExtrudeTriangles(
+            request.CellConnectivity,
+            request.NodeCoords.GetLength(0),
+            request.DisplayZ.Length) : new int[0, 4];
+        var conductivity = !includeExportVolume ? Array.Empty<double>() : valuesAreNodal
+            ? FlattenRows(displayValues)
+            : CreateTetraConductivity(displayValues);
+        var triangleDisplayValues = valuesAreNodal
+            ? ProjectNodalValuesToTriangles(displayValues, request.CellConnectivity)
+            : displayValues;
+        var triangleDisplayVariance = valuesAreNodal
+            ? ProjectNodalValuesToTriangles(displayVariance, request.CellConnectivity)
+            : displayVariance;
+
+        return new LayeredPseudo3dVolume(
+            lower.SetLabel,
+            upper.SetLabel,
+            lower.AcquiredAt,
+            upper.AcquiredAt,
+            (upper.AcquiredAt - lower.AcquiredAt).Duration(),
+            request.SourceZ[1] - request.SourceZ[0],
+            request.DisplayZ,
+            request.NodeCoords,
+            request.CellConnectivity,
+            nodeCoords3d,
+            tetraConnectivity,
+            conductivity,
+            triangleDisplayValues,
+            lower.Result.ReconstructionScaleStatus,
+            lower.Result.ReconstructionScaleProvenance,
+            LayeredPseudo3dVolume.KrigingAlgorithmId,
+            triangleDisplayVariance,
+            result.MetadataJson);
+    }
+
+    private static void ValidateKrigingResult(
+        Pseudo3dKrigingRequest request,
+        Pseudo3dKrigingResult result)
+    {
+        if (result.DisplayLayerValues.GetLength(0) != request.DisplayZ.Length
+            || result.DisplayLayerValues.GetLength(1) != request.LayerValues.GetLength(1)
+            || result.RelativeVariance.GetLength(0) != request.DisplayZ.Length
+            || result.RelativeVariance.GetLength(1) != request.LayerValues.GetLength(1))
+        {
+            throw new InvalidDataException("Pseudo-3D Kriging output shape does not match its request.");
+        }
+
+        foreach (double value in result.DisplayLayerValues)
+        {
+            if (!double.IsFinite(value))
+            {
+                throw new InvalidDataException("Pseudo-3D Kriging output contains non-finite means.");
+            }
+        }
+
+        foreach (double variance in result.RelativeVariance)
+        {
+            if (!double.IsFinite(variance) || variance < 0.0 || variance > 1.0)
+            {
+                throw new InvalidDataException("Pseudo-3D Kriging output contains invalid relative variance.");
+            }
+        }
+
+        for (var parameter = 0; parameter < request.LayerValues.GetLength(1); parameter++)
+        {
+            AssertSourcePlaneExact(
+                result.DisplayLayerValues[0, parameter],
+                request.LayerValues[0, parameter]);
+            AssertSourcePlaneExact(
+                result.DisplayLayerValues[request.DisplayZ.Length - 1, parameter],
+                request.LayerValues[1, parameter]);
+        }
+    }
+
+    private static void AssertSourcePlaneExact(double actual, double expected)
+    {
+        var tolerance = Math.Max(1.0, Math.Abs(expected)) * 1.0e-12;
+        if (Math.Abs(actual - expected) > tolerance)
+        {
+            throw new InvalidDataException("Pseudo-3D Kriging did not preserve a measured source plane.");
+        }
+    }
+
+    private static double EstimateLayerQuality(RealtimeReconstructionResult result)
+    {
+        var quality = result.ImageQualityScore;
+        if (quality is null && result.VoltageFitRelativeResidual is { } relativeResidual
+            && double.IsFinite(relativeResidual))
+        {
+            quality = 1.0 / (1.0 + Math.Max(0.0, relativeResidual));
+        }
+
+        var bounded = Math.Clamp(quality ?? 1.0, 0.0, 1.0);
+        if (result.DynamicKalmanFallback == true)
+        {
+            bounded *= 0.75;
+        }
+
+        if (result.DynamicKalmanVarianceInflation is { } inflation
+            && double.IsFinite(inflation)
+            && inflation > 1.0)
+        {
+            bounded /= Math.Sqrt(inflation);
+        }
+
+        if (result.DynamicKalmanNisPerDof is { } nis
+            && double.IsFinite(nis)
+            && nis > 1.0)
+        {
+            bounded /= Math.Sqrt(nis);
+        }
+
+        return Math.Clamp(bounded, 0.0, 1.0);
     }
 
     private static void ValidateResult(RealtimeReconstructionResult result, string parameterName)
@@ -202,6 +469,7 @@ public static class LayeredPseudo3dInterpolator
 
     private static double[,] CopyFirstTwoColumns(double[,] source)
     {
+        if (source.GetLength(1) == 2) return source;
         var output = new double[source.GetLength(0), 2];
         for (var row = 0; row < source.GetLength(0); row++)
         {
@@ -248,8 +516,8 @@ public static class LayeredPseudo3dInterpolator
                 throw new InvalidDataException("Pseudo-3D triangular conductivity must be per-node or per-cell.");
             }
 
-            values = conductivity.ToArray();
-            return (int[,])cells.Clone();
+            values = conductivity as double[] ?? conductivity.ToArray();
+            return cells;
         }
 
         if (verticesPerCell != 4)

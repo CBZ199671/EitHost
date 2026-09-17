@@ -53,6 +53,11 @@ internal sealed class RealtimeRunCommandController
 
     internal void StartSelectedCore()
     {
+        if (callbacks.GetPseudo3dSelection?.Invoke() is { Enabled: true } selection)
+        {
+            StartTimeDivisionGroup(selection);
+            return;
+        }
         if (callbacks.GetSelectedPairing() is not { } pairing)
         {
             callbacks.AddDiagnostic("start rejected: no selected pairing");
@@ -83,6 +88,11 @@ internal sealed class RealtimeRunCommandController
 
     internal void StartAllCore()
     {
+        if (callbacks.GetPseudo3dSelection?.Invoke() is { Enabled: true } selection)
+        {
+            StartTimeDivisionGroup(selection);
+            return;
+        }
         var pairings = callbacks.GetBoundPairings();
         if (pairings.Count == 0)
         {
@@ -135,7 +145,9 @@ internal sealed class RealtimeRunCommandController
     internal bool StartForPairing(
         PairingSummaryItem pairing,
         bool selectForDisplay,
-        out string? rejectionMessage)
+        out string? rejectionMessage,
+        Pseudo3dAcquisitionGroup? group = null,
+        DeviceRunParameterProfile? parameterOverride = null)
     {
         ArgumentNullException.ThrowIfNull(pairing);
         rejectionMessage = null;
@@ -168,14 +180,14 @@ internal sealed class RealtimeRunCommandController
             return false;
         }
 
-        var parameters = callbacks.GetRunParameters(pairing);
+        var parameters = parameterOverride ?? callbacks.GetRunParameters(pairing);
         if (!parameters.TryValidateDemodDiscardCycles(out rejectionMessage))
         {
             callbacks.AddDiagnostic($"start rejected: invalid demod discard cycles for {pairing.Title}: {rejectionMessage}");
             return false;
         }
 
-        if (parameters.ExcitationScanTimes > 0)
+        if (parameters.ExcitationScanTimes > 0 && group is null)
         {
             rejectionMessage =
                 "有限扫描必须先启动 USB2070 再启动 DDS；当前实时成像启动顺序尚未提供该原子流程，请设扫描圈数为 0。";
@@ -191,6 +203,22 @@ internal sealed class RealtimeRunCommandController
         {
             rejectionMessage = ex.Message;
             callbacks.AddDiagnostic($"start rejected: insufficient DataRoot capacity for {pairing.Title}: {ex.Message}");
+            return false;
+        }
+
+        string backendProfile;
+        try
+        {
+            backendProfile = callbacks.GetBackendProfile();
+            if (string.IsNullOrWhiteSpace(backendProfile))
+            {
+                throw new InvalidOperationException("请先选择有效的 PyEIDORS 后端路线，再启动测量。");
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            rejectionMessage = ex.Message;
+            callbacks.AddDiagnostic($"start rejected: backend not ready for {pairing.Title}: {ex.Message}");
             return false;
         }
 
@@ -216,7 +244,7 @@ internal sealed class RealtimeRunCommandController
         }
 
         callbacks.SetStatus($"{pairing.Title} 实时成像正在启动：准备 DDS、USB2070 和 PyEIDORS。");
-        var config = CreateConfig(pairing, portName, parameters);
+        var config = CreateConfig(pairing, portName, parameters, backendProfile) with { TimeDivisionGroup = group };
         state.Config = config;
         state.VisualizationWorker = new LatestOnlyAsyncWorker<RealtimeVisualizationWorkItem>(
             (item, _) =>
@@ -248,6 +276,15 @@ internal sealed class RealtimeRunCommandController
 
     internal bool RequestStop(bool showIdleMessage, string? setLabel = null)
     {
+        if (GetStatesToStop(setLabel).FirstOrDefault()?.Config?.TimeDivisionGroup is { } group)
+        {
+            group.Cancel();
+            foreach (var member in sessions.GetStatesToStop(null).Where(item => item.Config?.TimeDivisionGroup == group))
+                sessions.RequestStop(member.SetLabel);
+            callbacks.SetStatus("双设备分时组正在停止：关闭两套激励并结束采集。");
+            callbacks.NotifyCanExecuteChanged();
+            return true;
+        }
         var request = sessions.RequestStop(setLabel);
         var states = request.States;
         if (states.Count == 0)
@@ -283,14 +320,23 @@ internal sealed class RealtimeRunCommandController
         return true;
     }
 
-    internal RealtimeRunState[] GetStatesToStop(string? setLabel) =>
-        sessions.GetStatesToStop(setLabel).ToArray();
+    internal RealtimeRunState[] GetStatesToStop(string? setLabel)
+    {
+        var states = sessions.GetStatesToStop(setLabel).ToArray();
+        if (setLabel is not null && states.FirstOrDefault()?.Config?.TimeDivisionGroup is { } group)
+            return sessions.GetStatesToStop(null).Where(item => item.Config?.TimeDivisionGroup == group).ToArray();
+        return states;
+    }
 
     internal bool CanStartSelected() =>
-        callbacks.GetSelectedPairing() is { } pairing && CanStartPairing(pairing);
+        callbacks.GetPseudo3dSelection?.Invoke() is { Enabled: true } selection
+            ? CanStartTimeDivision(selection)
+            : callbacks.GetSelectedPairing() is { } pairing && CanStartPairing(pairing);
 
     internal bool CanStartAll()
     {
+        if (callbacks.GetPseudo3dSelection?.Invoke() is { Enabled: true } selection)
+            return CanStartTimeDivision(selection);
         var pairings = callbacks.GetBoundPairings();
         return pairings.Count > 0 && pairings.Any(CanStartPairing);
     }
@@ -299,6 +345,42 @@ internal sealed class RealtimeRunCommandController
         callbacks.IsCatalogReady()
         && !acquisition.IsActive(pairing.Title)
         && !sessions.IsSetActive(pairing.Title);
+
+    private bool CanStartTimeDivision(Pseudo3dRunSelection selection) =>
+        !sessions.IsAnyActive && selection.Lower is { } lower && selection.Upper is { } upper &&
+        lower.Title != upper.Title && CanStartPairing(lower) && CanStartPairing(upper);
+
+    private void StartTimeDivisionGroup(Pseudo3dRunSelection selection)
+    {
+        var bound = callbacks.GetBoundPairings();
+        if (bound.Count < 2 || selection.Lower is not { } lower || selection.Upper is not { } upper ||
+            !bound.Contains(lower) || !bound.Contains(upper) || !CanStartTimeDivision(selection))
+            throw new InvalidOperationException("同频分时伪三维需要选择两套空闲且不同的已绑定设备；请先停止正在运行的采集。");
+        if (callbacks.CreateUsbDevice(lower).DeviceNumber == callbacks.CreateUsbDevice(upper).DeviceNumber ||
+            string.Equals(lower.Pairing.DdsSerialCandidate.PortName, upper.Pairing.DdsSerialCandidate.PortName, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("伪三维的两套设备必须使用不同 USB2070 和不同 DDS 串口。");
+        callbacks.SaveVisibleParameters();
+        // The lower layer supplies one shared inverse configuration. Saved
+        // independent 2-D device profiles remain available after leaving this mode.
+        var parameters = Pseudo3dAcquisitionGroup.ApplyProfile(callbacks.GetRunParameters(lower));
+        callbacks.EnsureStorageCapacity(parameters);
+        if (string.IsNullOrWhiteSpace(callbacks.GetBackendProfile()))
+            throw new InvalidOperationException("请先选择有效的 PyEIDORS 后端路线。");
+        var group = new Pseudo3dAcquisitionGroup(lower.Title, upper.Title);
+        try
+        {
+            if (!StartForPairing(lower, true, out var lowerError, group, parameters))
+                throw new InvalidOperationException(lowerError);
+            if (!StartForPairing(upper, false, out var upperError, group, parameters))
+                throw new InvalidOperationException(upperError);
+            callbacks.SetStatus($"同频分时伪三维已启动：{lower.Title} → {upper.Title}；3125 Hz、10 µA、20 周期、前 8 后 4。两层网格及算法使用下层设置。");
+        }
+        catch
+        {
+            group.Cancel();
+            throw;
+        }
+    }
 
     internal bool CanStopSelected()
     {
@@ -337,7 +419,8 @@ internal sealed class RealtimeRunCommandController
     private RealtimeImagingRunConfig CreateConfig(
         PairingSummaryItem pairing,
         string portName,
-        DeviceRunParameterProfile parameters) =>
+        DeviceRunParameterProfile parameters,
+        string backendProfile) =>
         new(
             pairing,
             pairing.Title,
@@ -372,7 +455,7 @@ internal sealed class RealtimeRunCommandController
             parameters.RealtimeEnableTemporalDespiking,
             parameters.RealtimeEnableDynamicKalman && parameters.RealtimeEnableTemporalDespiking,
             parameters.RealtimeDynamicKalmanMode,
-            callbacks.GetBackendProfile(),
+            backendProfile,
             Guid.NewGuid(),
             parameters.CreateExcitationMetadata(),
             parameters.RealtimeUseFrequencyDivisionLockIn
@@ -474,7 +557,8 @@ internal sealed record RealtimeRunCommandCallbacks(
     Action<string> AddLog,
     Action<string> SetStatus,
     Action NotifyRunStateChanged,
-    Action NotifyCanExecuteChanged);
+    Action NotifyCanExecuteChanged,
+    Func<Pseudo3dRunSelection>? GetPseudo3dSelection = null);
 
 internal sealed record RealtimeStartPresentation(
     string ImageStats,

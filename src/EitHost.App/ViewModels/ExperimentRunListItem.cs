@@ -57,6 +57,13 @@ public sealed class ExperimentRunListItem
 
     public string SourceKind { get; }
 
+    public Pseudo3dExperimentMember? Pseudo3dMember { get; private init; }
+    public bool IsPseudo3d => Pseudo3dMember is not null;
+    public string GroupKey => Pseudo3dMember is { } member ? $"伪三维采集组 · {member.GroupId:D}" : Key;
+    public string LayerIdentity => Pseudo3dMember is { } member
+        ? $"{(member.Slot == 0 ? "下层" : "上层")} · {SetLabel} · run {ExperimentRunId:D}"
+        : SetLabel;
+
     public bool IsLegacy => Run is null;
 
     public bool IsCanonicalTerminal => Run is { } run && IsTerminalStatus(run.Status);
@@ -72,7 +79,7 @@ public sealed class ExperimentRunListItem
             ExperimentCatalog.FailedStatus;
     }
 
-    public string Title => $"{SetLabel}  {StartedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}";
+    public string Title => $"{(Pseudo3dMember is { } member ? (member.Slot == 0 ? "下层 · " : "上层 · ") : "")}{SetLabel}  {StartedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}";
 
     public string StateLine => Run is { } run
         ? $"状态 {TranslateStatus(run.Status)} · raw {TranslateStatus(run.RawStatus)} · 解调 {TranslateStatus(run.DemodStatus)} · 重构 {TranslateStatus(run.ReconstructionStatus)}" +
@@ -111,9 +118,11 @@ public sealed class ExperimentRunListItem
         }
     }
 
-    public string ReplayLine => Run is not null
+    public string ReplayLine => IsPseudo3d
+        ? $"伪三维组采集回放 · 解调 {Coverage.DemodReadyCount} · 二维重构 {Coverage.ReconstructionReadyCount} · 选择任一层查看同组双层/三维回放"
+        : Run is not null
         ? Coverage.DemodReadyCount > 0
-            ? $"规范 HDF5 回放就绪 · 解调 {Coverage.DemodReadyCount} · 重构 {Coverage.ReconstructionReadyCount}"
+            ? $"规范 HDF5 数据已保存 · 解调 {Coverage.DemodReadyCount} · 重构 {Coverage.ReconstructionReadyCount} · 请选择已发布线路；无线路时生成离线完整回放"
             : "尚无可回放解调块；原始数据仍可检查或离线补算"
         : ImagingRun is { } imaging
             ? $"旧库只读回放 · 帧 {imaging.Summary.FrameCount} · 重构 {imaging.Summary.ReconCount}"
@@ -125,7 +134,8 @@ public sealed class ExperimentRunListItem
         ExperimentRunRecord run,
         ExperimentCoverageSummary coverage,
         string? primaryRawHdf5Path,
-        string runDirectoryPath)
+        string runDirectoryPath,
+        Pseudo3dExperimentMember? pseudo3dMember = null)
     {
         ArgumentNullException.ThrowIfNull(run);
         return new ExperimentRunListItem(
@@ -139,7 +149,7 @@ public sealed class ExperimentRunListItem
             Path.GetFullPath(runDirectoryPath),
             null,
             null,
-            "统一实验");
+            "统一实验") { Pseudo3dMember = pseudo3dMember };
     }
 
     public static ExperimentRunListItem CreateLegacy(

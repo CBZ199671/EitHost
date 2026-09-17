@@ -15,6 +15,10 @@ public sealed record WslPyEidorsBackendProfile(
     public bool RequiresCanonicalMeshIndex { get; init; }
 }
 
+public sealed record WslPyEidorsBackendManifestSnapshot(
+    string? DefaultProfile,
+    IReadOnlyList<WslPyEidorsBackendProfile> Profiles);
+
 public static class WslPyEidorsBackendManifest
 {
     public const string FileName = "pyeidors.backend.json";
@@ -41,11 +45,28 @@ public static class WslPyEidorsBackendManifest
             throw new InvalidOperationException("请选择 PyEIDORS 后端路线。");
         }
 
-        var profiles = LoadProfilesOrThrow(
+        var snapshot = LoadSnapshotOrThrow(
             options.DistroName,
             options.BackendRepositoryPath,
             requireDefaultProfile: false);
-        var profile = profiles.FirstOrDefault(candidate => string.Equals(
+        return ApplyProfile(options, snapshot, profileName);
+    }
+
+    public static WslPyEidorsReconstructionOptions ApplyProfile(
+        WslPyEidorsReconstructionOptions options,
+        WslPyEidorsBackendManifestSnapshot snapshot,
+        string? preferredProfile = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(snapshot.Profiles);
+        var profileName = string.IsNullOrWhiteSpace(preferredProfile) ? options.BackendProfile : preferredProfile;
+        if (string.IsNullOrWhiteSpace(profileName))
+        {
+            throw new InvalidOperationException("请选择 PyEIDORS 后端路线。");
+        }
+
+        var profile = snapshot.Profiles.FirstOrDefault(candidate => string.Equals(
             candidate.ProfileName,
             profileName.Trim(),
             StringComparison.Ordinal));
@@ -92,6 +113,35 @@ public static class WslPyEidorsBackendManifest
         return ApplyProfileIfManifestExists(options);
     }
 
+    public static WslPyEidorsReconstructionOptions ResolveConfiguredOrDefault(
+        WslPyEidorsReconstructionOptions options,
+        WslPyEidorsBackendManifestSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(snapshot.Profiles);
+        options = RemoveLegacyImplicitFallback(options);
+        if (!string.IsNullOrWhiteSpace(options.BackendProfile))
+        {
+            if (string.Equals(options.BackendProfile, CustomProfile, StringComparison.Ordinal)
+                && (!string.IsNullOrWhiteSpace(options.WorkerLaunchCommand) || options.UseNixDevelop))
+            {
+                return options;
+            }
+
+            return ApplyProfile(options, snapshot, options.BackendProfile);
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.WorkerLaunchCommand) || options.UseNixDevelop)
+        {
+            return options with { BackendProfile = CustomProfile };
+        }
+
+        return string.IsNullOrWhiteSpace(snapshot.DefaultProfile)
+            ? options
+            : ApplyProfile(options, snapshot, snapshot.DefaultProfile);
+    }
+
     public static WslPyEidorsReconstructionOptions ApplyProfileIfManifestExists(
         WslPyEidorsReconstructionOptions options,
         string? preferredProfile = null)
@@ -115,8 +165,32 @@ public static class WslPyEidorsBackendManifest
     public static IReadOnlyList<WslPyEidorsBackendProfile> LoadProfilesOrThrow(
         string distroName,
         string backendRepositoryPath,
-        bool requireDefaultProfile = true)
+        bool requireDefaultProfile = true) =>
+        LoadSnapshotOrThrow(distroName, backendRepositoryPath, requireDefaultProfile).Profiles;
+
+    public static WslPyEidorsBackendManifestSnapshot LoadSnapshotOrThrow(
+        string distroName,
+        string backendRepositoryPath,
+        bool requireDefaultProfile = true) =>
+        LoadSnapshotOrThrow(
+            distroName,
+            backendRepositoryPath,
+            requireDefaultProfile,
+            static path => File.ReadAllText(path),
+            static (distro, path) => WslTextFileReader.ReadAllText(distro, path),
+            static (distro, path) => WslTextFileReader.FileExists(distro, path));
+
+    internal static WslPyEidorsBackendManifestSnapshot LoadSnapshotOrThrow(
+        string distroName,
+        string backendRepositoryPath,
+        bool requireDefaultProfile,
+        Func<string, string> readHostText,
+        Func<string, string, string> readWslText,
+        Func<string, string, bool> probeWslFile)
     {
+        ArgumentNullException.ThrowIfNull(readHostText);
+        ArgumentNullException.ThrowIfNull(readWslText);
+        ArgumentNullException.ThrowIfNull(probeWslFile);
         var manifestPath = FileName;
         try
         {
@@ -131,23 +205,79 @@ public static class WslPyEidorsBackendManifest
 
             manifestPath = Path.Combine(backendRepositoryPath.Trim(), FileName);
             manifestPath = ResolveManifestPath(distroName, backendRepositoryPath);
-            if (!File.Exists(manifestPath))
+            var isWslManifest = TryResolveWslManifestLocation(
+                distroName,
+                backendRepositoryPath,
+                out var resolvedDistro,
+                out var linuxManifestPath);
+            string manifestText;
+            try
+            {
+                manifestText = ReadManifestText(
+                    distroName,
+                    backendRepositoryPath,
+                    manifestPath,
+                    readHostText,
+                    readWslText);
+            }
+            catch (Exception ex) when (!isWslManifest
+                && ex is FileNotFoundException or DirectoryNotFoundException)
             {
                 throw PyEidorsReconstructionException.FromFrontendConfiguration(
                     manifestPath,
                     "BackendManifestNotFound",
-                    "所选目录中不存在 pyeidors.backend.json；请选择 ~/apps/PyEIDORS 稳定软件根目录。");
+                    "所选目录中不存在 pyeidors.backend.json；请选择 PyEIDORS 稳定软件根目录。",
+                    ex);
+            }
+            catch (IOException ex) when (isWslManifest)
+            {
+                bool manifestExists;
+                try
+                {
+                    manifestExists = probeWslFile(resolvedDistro, linuxManifestPath);
+                }
+                catch (Exception probeException) when (probeException is IOException
+                    or UnauthorizedAccessException or ArgumentException or InvalidOperationException
+                    or NotSupportedException)
+                {
+                    var combined = new AggregateException(ex, probeException);
+                    throw PyEidorsReconstructionException.FromFrontendConfiguration(
+                        manifestPath,
+                        "BackendManifestWslReadFailed",
+                        $"无法在 WSL 发行版 '{resolvedDistro}' 中读取 '{linuxManifestPath}'，"
+                        + $"且存在性检查失败。读取原因：{ex.Message} 检查原因：{probeException.Message}",
+                        combined);
+                }
+
+                if (manifestExists)
+                {
+                    throw PyEidorsReconstructionException.FromFrontendConfiguration(
+                        manifestPath,
+                        "BackendManifestWslReadFailed",
+                        $"无法在 WSL 发行版 '{resolvedDistro}' 中读取 '{linuxManifestPath}'。"
+                        + "请检查 current 链接、文件读取权限、UTF-8 编码和 1 MiB 大小限制。"
+                        + $" 原因：{ex.Message}",
+                        ex);
+                }
+
+                throw PyEidorsReconstructionException.FromFrontendConfiguration(
+                    manifestPath,
+                    "BackendManifestNotFound",
+                    $"所选目录中不存在 pyeidors.backend.json；请确认 WSL 发行版 '{resolvedDistro}'"
+                    + $" 和清单路径 '{linuxManifestPath}'。",
+                    ex);
             }
 
             using var document = JsonDocument.Parse(
-                File.ReadAllText(manifestPath),
+                manifestText,
                 new JsonDocumentOptions
                 {
                     AllowTrailingCommas = JsonOptions.AllowTrailingCommas,
                     CommentHandling = JsonCommentHandling.Skip
                 });
             var root = document.RootElement;
-            if (!root.TryGetProperty("profiles", out var profileElements)
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("profiles", out var profileElements)
                 || profileElements.ValueKind != JsonValueKind.Object)
             {
                 throw PyEidorsReconstructionException.FromFrontendConfiguration(
@@ -204,7 +334,9 @@ public static class WslPyEidorsBackendManifest
                     "pyeidors.backend.json 没有可用 profile，或 defaultProfile 未指向有效 profile。");
             }
 
-            return profiles;
+            return new WslPyEidorsBackendManifestSnapshot(
+                defaultProfile,
+                Array.AsReadOnly(profiles.ToArray()));
         }
         catch (PyEidorsReconstructionException)
         {
@@ -240,31 +372,46 @@ public static class WslPyEidorsBackendManifest
             return false;
         }
 
-        using (document)
+        try
         {
-            var requiresCanonicalMeshIndex = ReadBoolean(
-                document.RootElement,
-                "requiresCanonicalMeshIndex");
-            if (!document.RootElement.TryGetProperty("profiles", out var profileElements)
-                || profileElements.ValueKind != JsonValueKind.Object)
+            using (document)
             {
-                return false;
-            }
-
-            var parsed = new List<WslPyEidorsBackendProfile>();
-            foreach (var property in profileElements.EnumerateObject())
-            {
-                if (TryReadProfile(property.Name, property.Value, out var profile))
+                var root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object)
                 {
-                    parsed.Add(profile with
-                    {
-                        RequiresCanonicalMeshIndex = requiresCanonicalMeshIndex
-                    });
+                    return false;
                 }
-            }
 
-            profiles = parsed;
-            return profiles.Count > 0;
+                var requiresCanonicalMeshIndex = ReadBoolean(
+                    root,
+                    "requiresCanonicalMeshIndex");
+                if (!root.TryGetProperty("profiles", out var profileElements)
+                    || profileElements.ValueKind != JsonValueKind.Object)
+                {
+                    return false;
+                }
+
+                var parsed = new List<WslPyEidorsBackendProfile>();
+                foreach (var property in profileElements.EnumerateObject())
+                {
+                    if (TryReadProfile(property.Name, property.Value, out var profile))
+                    {
+                        parsed.Add(profile with
+                        {
+                            RequiresCanonicalMeshIndex = requiresCanonicalMeshIndex
+                        });
+                    }
+                }
+
+                profiles = parsed;
+                return profiles.Count > 0;
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException
+            or ArgumentException or NotSupportedException)
+        {
+            profiles = [];
+            return false;
         }
     }
 
@@ -280,38 +427,52 @@ public static class WslPyEidorsBackendManifest
             return false;
         }
 
-        using (document)
+        try
         {
-            var root = document.RootElement;
-            var profileName = string.IsNullOrWhiteSpace(preferredProfile)
-                ? ReadString(root, "defaultProfile")
-                : preferredProfile.Trim();
-            if (string.IsNullOrWhiteSpace(profileName))
+            using (document)
             {
-                return false;
-            }
+                var root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object)
+                {
+                    return false;
+                }
 
-            if (!root.TryGetProperty("profiles", out var profiles)
-                || profiles.ValueKind != JsonValueKind.Object)
-            {
-                return false;
-            }
+                var profileName = string.IsNullOrWhiteSpace(preferredProfile)
+                    ? ReadString(root, "defaultProfile")
+                    : preferredProfile.Trim();
+                if (string.IsNullOrWhiteSpace(profileName))
+                {
+                    return false;
+                }
 
-            if (!profiles.TryGetProperty(profileName, out var profileElement))
-            {
-                return false;
-            }
+                if (!root.TryGetProperty("profiles", out var profiles)
+                    || profiles.ValueKind != JsonValueKind.Object)
+                {
+                    return false;
+                }
 
-            if (!TryReadProfile(profileName, profileElement, out profile))
-            {
-                return false;
-            }
+                if (!profiles.TryGetProperty(profileName, out var profileElement))
+                {
+                    return false;
+                }
 
-            profile = profile with
-            {
-                RequiresCanonicalMeshIndex = ReadBoolean(root, "requiresCanonicalMeshIndex")
-            };
-            return true;
+                if (!TryReadProfile(profileName, profileElement, out profile))
+                {
+                    return false;
+                }
+
+                profile = profile with
+                {
+                    RequiresCanonicalMeshIndex = ReadBoolean(root, "requiresCanonicalMeshIndex")
+                };
+                return true;
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException
+            or ArgumentException or NotSupportedException)
+        {
+            profile = null!;
+            return false;
         }
     }
 
@@ -329,16 +490,16 @@ public static class WslPyEidorsBackendManifest
         try
         {
             var manifestPath = ResolveManifestPath(distroName, backendRepositoryPath);
-            if (!File.Exists(manifestPath))
-            {
-                return false;
-            }
-
-            document = JsonDocument.Parse(File.ReadAllText(manifestPath), new JsonDocumentOptions
-            {
-                AllowTrailingCommas = JsonOptions.AllowTrailingCommas,
-                CommentHandling = JsonCommentHandling.Skip
-            });
+            document = JsonDocument.Parse(ReadManifestText(
+                distroName,
+                backendRepositoryPath,
+                manifestPath,
+                static path => File.ReadAllText(path),
+                static (distro, path) => WslTextFileReader.ReadAllText(distro, path)), new JsonDocumentOptions
+                {
+                    AllowTrailingCommas = JsonOptions.AllowTrailingCommas,
+                    CommentHandling = JsonCommentHandling.Skip
+                });
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
@@ -356,6 +517,11 @@ public static class WslPyEidorsBackendManifest
         out WslPyEidorsBackendProfile profile)
     {
         profile = null!;
+        if (profileElement.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
         var workerLaunchCommand = ReadString(profileElement, "workerLaunchCommand");
         var doctorCommand = ReadString(profileElement, "doctorCommand");
         if (string.IsNullOrWhiteSpace(workerLaunchCommand))
@@ -378,19 +544,73 @@ public static class WslPyEidorsBackendManifest
     private static string ResolveManifestPath(string distroName, string backendRepositoryPath)
     {
         var configuredPath = backendRepositoryPath.Trim();
-        if (Path.IsPathFullyQualified(configuredPath) && Directory.Exists(configuredPath))
+        if (TryResolveWslManifestLocation(
+                distroName,
+                configuredPath,
+                out var resolvedDistro,
+                out var linuxManifestPath))
+        {
+            return WslPathMapper.ToWslUncPath(resolvedDistro, linuxManifestPath);
+        }
+
+        if (Path.IsPathFullyQualified(configuredPath))
         {
             return Path.Combine(configuredPath, FileName);
         }
 
-        var linuxPath = configuredPath.Replace('\\', '/');
-        if (Path.IsPathFullyQualified(linuxPath))
+        var relativeLinuxManifestPath = configuredPath.Replace('\\', '/').TrimEnd('/') + "/" + FileName;
+        return WslPathMapper.ToWslUncPath(distroName, relativeLinuxManifestPath);
+    }
+
+    private static string ReadManifestText(
+        string distroName,
+        string backendRepositoryPath,
+        string manifestPath,
+        Func<string, string> readHostText,
+        Func<string, string, string> readWslText)
+    {
+        if (!TryResolveWslManifestLocation(
+                distroName,
+                backendRepositoryPath,
+                out var resolvedDistro,
+                out var linuxManifestPath))
         {
-            linuxPath = WslPathMapper.ToWslPath(linuxPath);
+            return readHostText(manifestPath);
         }
 
-        var uncPath = WslPathMapper.ToWslUncPath(distroName, linuxPath);
-        return Path.Combine(uncPath, FileName);
+        return readWslText(resolvedDistro, linuxManifestPath);
+    }
+
+    private static bool TryResolveWslManifestLocation(
+        string distroName,
+        string backendRepositoryPath,
+        out string resolvedDistro,
+        out string linuxManifestPath)
+    {
+        var configuredPath = backendRepositoryPath.Trim();
+        string linuxRepositoryPath;
+        if (WslPathMapper.TryParseWslUncPath(
+                configuredPath,
+                out var selectedDistro,
+                out var selectedLinuxPath))
+        {
+            resolvedDistro = selectedDistro;
+            linuxRepositoryPath = selectedLinuxPath;
+        }
+        else if (configuredPath.StartsWith("/", StringComparison.Ordinal))
+        {
+            resolvedDistro = distroName.Trim();
+            linuxRepositoryPath = configuredPath.Replace('\\', '/');
+        }
+        else
+        {
+            resolvedDistro = string.Empty;
+            linuxManifestPath = string.Empty;
+            return false;
+        }
+
+        linuxManifestPath = linuxRepositoryPath.TrimEnd('/') + "/" + FileName;
+        return true;
     }
 
     private static WslPyEidorsReconstructionOptions ApplyProfile(

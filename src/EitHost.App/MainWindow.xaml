@@ -4,6 +4,7 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
+        xmlns:views="clr-namespace:EitHost.App.Views"
         mc:Ignorable="d"
         Title="{Binding ApplicationTitle}"
         MinHeight="640"
@@ -25,9 +26,9 @@
                             UseAeroCaptionButtons="False" />
     </shell:WindowChrome.WindowChrome>
 
-    <DockPanel LastChildFill="True">
+    <DockPanel x:Name="ShellRoot" LastChildFill="True">
         <!-- ════════ Title bar with inline menu ════════ -->
-        <Border DockPanel.Dock="Top" Height="34" Background="{StaticResource SurfaceBrush}"
+        <Border DockPanel.Dock="Top" Style="{StaticResource ShellTitleBand}" Background="{StaticResource SurfaceBrush}"
                 BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,0,0,1"
                 MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
             <Grid>
@@ -46,7 +47,7 @@
                     <TextBlock Text="EIT 工作站" FontSize="12" FontWeight="Bold"
                                Foreground="{StaticResource Text1Brush}" Margin="8,0,0,0"
                                VerticalAlignment="Center" />
-                    <TextBlock Text="· EitHost v1.0" Style="{StaticResource MonoText}" FontSize="11"
+                    <TextBlock Text="{Binding ApplicationVersionLabel}" Style="{StaticResource MonoText}" FontSize="11"
                                Margin="6,0,0,0" VerticalAlignment="Center" />
                 </StackPanel>
                 <Menu Grid.Column="1" Background="Transparent" BorderThickness="0"
@@ -94,7 +95,7 @@
         </Border>
 
         <!-- ════════ Workstation toolbar ════════ -->
-        <Border DockPanel.Dock="Top" Height="46" Background="{StaticResource SurfaceBrush}"
+        <Border DockPanel.Dock="Top" Style="{StaticResource ShellToolbarBand}" Background="{StaticResource SurfaceBrush}"
                 BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,0,0,1">
             <DockPanel Margin="12,0" LastChildFill="True">
                 <TextBlock DockPanel.Dock="Right"
@@ -127,7 +128,7 @@
         </Border>
 
         <!-- ════════ Main tabs ════════ -->
-        <Border DockPanel.Dock="Top" Height="40" Background="{StaticResource SunkenBrush}"
+        <Border DockPanel.Dock="Top" Style="{StaticResource ShellTabBand}" Background="{StaticResource SunkenBrush}"
                 BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,0,0,1">
             <StackPanel Orientation="Horizontal" Margin="12,0,0,0">
                 <RadioButton x:Name="NavDashboard" Style="{StaticResource WorkbenchTabItem}" GroupName="workbench"
@@ -146,7 +147,7 @@
         </Border>
 
         <!-- ════════ Status bar ════════ -->
-        <Border DockPanel.Dock="Bottom" Height="32" Background="{StaticResource SurfaceBrush}"
+        <Border DockPanel.Dock="Bottom" Style="{StaticResource ShellStatusBand}" Background="{StaticResource SurfaceBrush}"
                 BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,1,0,0">
             <DockPanel Margin="12,0" LastChildFill="True">
                 <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
@@ -831,13 +832,13 @@
                 <!-- ════════════ 实测工作台 / 实时成像 ════════════ -->
                 <Grid x:Name="ViewRealtime" Visibility="Collapsed">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="320" />
+                        <ColumnDefinition Width="{Binding RealtimeSettingsWidth}" />
                         <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="288" />
+                        <ColumnDefinition Width="{Binding RealtimeHistoryWidth}" />
                     </Grid.ColumnDefinitions>
 
                     <!-- left setup guide -->
-                    <Border x:Name="RealtimeGuidePane" Grid.Column="0" Background="{StaticResource CanvasBrush}"
+                    <Border x:Name="RealtimeGuidePane" Visibility="{Binding RealtimeSettingsVisibility}" ClipToBounds="True" Grid.Column="0" Background="{StaticResource CanvasBrush}"
                             BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,0,1,0">
                         <DockPanel LastChildFill="True">
                             <ScrollViewer VerticalScrollBarVisibility="Auto"
@@ -1552,7 +1553,7 @@
                     <DockPanel MinHeight="560"
                                Height="{Binding ViewportHeight, ElementName=RealtimePlotScroll}">
                         <!-- one shared selector drives all four plots -->
-                        <Border DockPanel.Dock="Top" Style="{StaticResource PanelCard}" Padding="12,8" Margin="14,14,14,12">
+                        <Border DockPanel.Dock="Top" Style="{StaticResource PanelCard}" Padding="12,6" Margin="10,10,10,8">
                             <StackPanel>
                             <WrapPanel>
                                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
@@ -1563,29 +1564,58 @@
                                               DisplayMemberPath="Title"
                                               SelectedItem="{Binding SelectedRealtimeDisplayPairing}" />
                                 </StackPanel>
-                                <TextBlock Text="{Binding RealtimeImagingSummary}"
-                                           ToolTip="{Binding RealtimeImagingSummary}"
-                                           Style="{StaticResource MonoText}" FontSize="11"
-                                           VerticalAlignment="Center"
-                                           TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
-                                           LineHeight="15" LineStackingStrategy="BlockLineHeight"
-                                           Height="30" />
-                            </WrapPanel>
-                            <WrapPanel Margin="0,7,0,0">
-                                <CheckBox Content="双平面 2.5D"
-                                          ToolTip="两套设备分别完成二维反演后沿 z 线性插值；不填造跨层观测，不是真实 3D CEM 反演。"
+                                <ComboBox Style="{StaticResource PlotHeaderModeCombo}"
+                                          VerticalAlignment="Center" Margin="0,0,6,0"
+                                          ItemsSource="{Binding RealtimeDemodDisplayModeOptions}"
+                                          DisplayMemberPath="Label"
+                                          SelectedValuePath="Value"
+                                          SelectedValue="{Binding RealtimeDemodDisplayMode}"
+                                          IsEnabled="{Binding IsRealtimeDemodViewSelected}"
+                                          ToolTip="默认显示 EIDORS 对齐的实部/虚部；专家模式显示幅值/相位" />
+                                <ComboBox Style="{StaticResource PlotHeaderViewCombo}"
+                                          VerticalAlignment="Center" Margin="0,0,12,0"
+                                          ItemsSource="{Binding RealtimeSignalViewOptions}"
+                                          DisplayMemberPath="Label"
+                                          SelectedValuePath="Value"
+                                          SelectedValue="{Binding RealtimeSignalViewMode}" />
+                                <CheckBox Content="伪三维"
+                                          ToolTip="默认将两个独立二维重建参数场送入 PyEIDORS 质量感知 Kriging；不填造跨层电压，非真实 3D CEM 反演。"
                                           ContentTemplate="{StaticResource WrappedCheckLabel}"
                                           IsChecked="{Binding Pseudo3dEnabled}"
-                                          VerticalAlignment="Center" Margin="0,0,12,4" />
-                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,4">
+                                          IsEnabled="{Binding CanEnablePseudo3d}"
+                                          VerticalAlignment="Center" Margin="0,0,12,0" />
+                                <CheckBox Content="设备设置" IsChecked="{Binding ShowRealtimeSettings}" Margin="0,0,10,0" VerticalAlignment="Center" />
+                                <CheckBox Content="辅助曲线" IsChecked="{Binding ShowRealtimeAuxiliary}" Margin="0,0,10,0" VerticalAlignment="Center" />
+                                <CheckBox Content="帧与日志" IsChecked="{Binding ShowRealtimeHistory}" Margin="0,0,10,0" VerticalAlignment="Center" />
+                                <CheckBox Content="诊断详情" IsChecked="{Binding ShowRealtimeDiagnostics}" Margin="0,0,10,0" VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding RealtimeImagingSummary}"
+                                           ToolTip="{Binding RealtimeImagingSummary}"
+                                           Style="{StaticResource PlotStatsText}"
+                                           VerticalAlignment="Center" Margin="0" />
+                            </WrapPanel>
+                            <!-- Pseudo-3d parameters and provenance only matter once the mode is
+                                 armed, so they fold away and leave the height to the plots. The
+                                 伪三维 switch itself sits on the row above, always reachable. -->
+                            <Expander x:Name="RealtimePseudo3dExpander" Header="伪三维参数"
+                                      IsExpanded="False"
+                                      Margin="0,4,0,0">
+                            <StackPanel>
+                            <TextBlock Text="{Binding Pseudo3dAcquisitionPolicy}" TextWrapping="Wrap" Margin="0,4,0,4" />
+                            <WrapPanel Margin="0,4,0,0">
+                                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,4">
                                     <TextBlock Text="下层设备" Style="{StaticResource FieldLabel}"
                                                VerticalAlignment="Center" Margin="0,0,4,0" />
                                     <ComboBox MinWidth="140"
                                               ItemsSource="{Binding BoundPairings}"
                                               DisplayMemberPath="Title"
                                               SelectedItem="{Binding SelectedPseudo3dLowerPairing}"
-                                              IsEnabled="{Binding Pseudo3dEnabled}" />
-                                </StackPanel>
+                                              IsEnabled="{Binding CanEditPseudo3dDevices}" />
+                                 </StackPanel>
+                                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,4">
+                                     <TextBlock Text="插值方法" Style="{StaticResource FieldLabel}"
+                                                VerticalAlignment="Center" Margin="0,0,4,0" />
+                                     <TextBlock Text="后端 Kriging v2" VerticalAlignment="Center" />
+                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,4">
                                     <TextBlock Text="上层设备" Style="{StaticResource FieldLabel}"
                                                VerticalAlignment="Center" Margin="0,0,4,0" />
@@ -1593,9 +1623,9 @@
                                               ItemsSource="{Binding BoundPairings}"
                                               DisplayMemberPath="Title"
                                               SelectedItem="{Binding SelectedPseudo3dUpperPairing}"
-                                              IsEnabled="{Binding Pseudo3dEnabled}" />
+                                              IsEnabled="{Binding CanEditPseudo3dDevices}" />
                                 </StackPanel>
-                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,8,4">
+                                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,8,4">
                                     <TextBlock Text="显示层数" Style="{StaticResource FieldLabel}"
                                                VerticalAlignment="Center" Margin="0,0,4,0" />
                                     <TextBox MinWidth="38"
@@ -1608,8 +1638,23 @@
                                                 </Binding.ValidationRules>
                                             </Binding>
                                         </TextBox.Text>
-                                    </TextBox>
-                                </StackPanel>
+                                     </TextBox>
+                                 </StackPanel>
+                                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,8,4">
+                                     <TextBlock Text="轴向尺度因子" Style="{StaticResource FieldLabel}"
+                                                VerticalAlignment="Center" Margin="0,0,4,0" />
+                                     <TextBox MinWidth="46"
+                                              ToolTip="Kriging 轴向相关长度 = 此因子 × 两设备平面间距；仅有两层时不会自动拟合该参数。"
+                                              IsEnabled="{Binding Pseudo3dEnabled}">
+                                         <TextBox.Text>
+                                             <Binding Path="Pseudo3dAxialRangeFactor" UpdateSourceTrigger="LostFocus">
+                                                 <Binding.ValidationRules>
+                                                     <StaticResource ResourceKey="Pseudo3dNormalizedHeightRule" />
+                                                 </Binding.ValidationRules>
+                                             </Binding>
+                                         </TextBox.Text>
+                                     </TextBox>
+                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,8,4">
                                     <TextBlock Text="归一化高度" Style="{StaticResource FieldLabel}"
                                                VerticalAlignment="Center" Margin="0,0,4,0" />
@@ -1630,6 +1675,7 @@
                                                VerticalAlignment="Center" Margin="0,0,4,0" />
                                     <TextBox MinWidth="54"
                                              ToolTip="两层采集时间差超过此值时拒绝合成。"
+                                             IsReadOnly="True"
                                              IsEnabled="{Binding Pseudo3dEnabled}">
                                         <TextBox.Text>
                                             <Binding Path="Pseudo3dMaximumPairSkewMilliseconds" UpdateSourceTrigger="LostFocus">
@@ -1650,35 +1696,34 @@
                                        Style="{StaticResource HintText}" FontSize="10" Margin="0,2,0,0"
                                        TextWrapping="Wrap" TextTrimming="CharacterEllipsis" />
                             </StackPanel>
+                            </Expander>
+                            </StackPanel>
                         </Border>
 
-                        <Grid Margin="14,0,14,14">
+                        <Grid x:Name="RealtimePlotGrid" Margin="10,0,10,10">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="12" />
-                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="3*" />
+                                <ColumnDefinition Width="8" />
+                                <ColumnDefinition Width="{Binding RealtimeAuxiliaryWidth}" />
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="*" />
-                                <RowDefinition Height="12" />
+                                <RowDefinition Height="*" />
                                 <RowDefinition Height="*" />
                             </Grid.RowDefinitions>
 
-                            <Border Grid.Row="0" Grid.Column="0" Style="{StaticResource PanelCard}">
-                                <DockPanel Margin="12">
+                            <Border Grid.Row="0" Grid.Column="2" Visibility="{Binding RealtimeAuxiliaryVisibility}" Style="{StaticResource PanelCard}">
+                                <DockPanel Style="{StaticResource PlotCardBody}">
                                     <StackPanel DockPanel.Dock="Top">
-                                        <Grid Height="30">
+                                        <Grid Style="{StaticResource PlotCardTitleBar}">
                                             <TextBlock Text="原始边界电压 CH1" ToolTip="原始边界电压 CH1" Style="{StaticResource H3Text}"
                                                        VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                                         </Grid>
                                         <TextBlock Text="{Binding RealtimeRawWaveStats}"
                                                    ToolTip="{Binding RealtimeRawWaveStats}"
-                                                   Style="{StaticResource MonoText}" FontSize="11" Margin="0,2,0,0"
-                                                   TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
-                                                   LineHeight="15" LineStackingStrategy="BlockLineHeight" Height="30" />
+                                                   Style="{StaticResource PlotStatsText}" />
                                     </StackPanel>
-                                    <Border Background="{StaticResource SunkenBrush}" BorderBrush="{StaticResource DividerBrush}"
-                                            BorderThickness="1" CornerRadius="8" Margin="0,10,0,0" Padding="8">
+                                    <Border x:Name="RealtimeRawPlotSurface" Style="{StaticResource PlotSurface}">
                                         <Viewbox Stretch="Fill">
                                             <Canvas Width="520" Height="220">
                                                 <Line X1="0" X2="520" Y1="55" Y2="55" Stroke="{StaticResource DividerBrush}" />
@@ -1693,39 +1738,23 @@
                                 </DockPanel>
                             </Border>
 
-                            <Border Grid.Row="0" Grid.Column="2" Style="{StaticResource PanelCard}">
-                                <DockPanel Margin="12">
+                            <Border Grid.Row="1" Grid.Column="2" Visibility="{Binding RealtimeAuxiliaryVisibility}" Margin="0,6,0,0" Style="{StaticResource PanelCard}">
+                                <DockPanel Style="{StaticResource PlotCardBody}">
                                     <StackPanel DockPanel.Dock="Top">
-                                        <WrapPanel MinHeight="30">
+                                        <Grid Style="{StaticResource PlotCardTitleBar}">
                                             <TextBlock Text="{Binding RealtimeSignalViewTitle}"
                                                        ToolTip="{Binding RealtimeSignalViewTitle}"
                                                        Style="{StaticResource H3Text}" VerticalAlignment="Center"
-                                                       TextTrimming="CharacterEllipsis"
-                                                       Margin="0,0,10,4" />
-                                            <ComboBox MinWidth="150" Height="30" Margin="0,0,6,4"
-                                                      ItemsSource="{Binding RealtimeDemodDisplayModeOptions}"
-                                                      DisplayMemberPath="Label"
-                                                      SelectedValuePath="Value"
-                                                      SelectedValue="{Binding RealtimeDemodDisplayMode}"
-                                                      IsEnabled="{Binding IsRealtimeDemodViewSelected}"
-                                                      ToolTip="默认显示 EIDORS 对齐的实部/虚部；专家模式显示幅值/相位" />
-                                            <ComboBox MinWidth="104" Height="30" Margin="0,0,0,4"
-                                                      ItemsSource="{Binding RealtimeSignalViewOptions}"
-                                                      DisplayMemberPath="Label"
-                                                      SelectedValuePath="Value"
-                                                      SelectedValue="{Binding RealtimeSignalViewMode}" />
-                                        </WrapPanel>
+                                                       TextTrimming="CharacterEllipsis" />
+                                        </Grid>
                                         <TextBlock Text="{Binding RealtimeDemodStats}"
                                                    ToolTip="{Binding RealtimeDemodStats}"
-                                                   Style="{StaticResource MonoText}" FontSize="11" Margin="0,2,0,0"
-                                                   TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
-                                                   LineHeight="15" LineStackingStrategy="BlockLineHeight" Height="30" />
+                                                   Style="{StaticResource PlotStatsText}" />
                                         <TextBlock Text="{Binding RealtimeDemodLegend}"
-                                                   Style="{StaticResource HintText}" FontSize="10" Margin="0,2,0,0"
-                                                   TextWrapping="Wrap" />
+                                                   ToolTip="{Binding RealtimeDemodLegend}"
+                                                   Style="{StaticResource PlotSecondaryText}" />
                                     </StackPanel>
-                                    <Border Background="{StaticResource SunkenBrush}" BorderBrush="{StaticResource DividerBrush}"
-                                            BorderThickness="1" CornerRadius="8" Margin="0,10,0,0" Padding="8">
+                                    <Border x:Name="RealtimeDemodPlotSurface" Style="{StaticResource PlotSurface}">
                                         <Viewbox Stretch="Fill">
                                             <Grid Width="594" Height="220">
                                                 <Grid.ColumnDefinitions>
@@ -1780,21 +1809,18 @@
                                 </DockPanel>
                             </Border>
 
-                            <Border Grid.Row="2" Grid.Column="0" Style="{StaticResource PanelCard}">
-                                <DockPanel Margin="12">
+                            <Border Grid.Row="2" Grid.Column="2" Visibility="{Binding RealtimeAuxiliaryVisibility}" Margin="0,6,0,0" Style="{StaticResource PanelCard}">
+                                <DockPanel Style="{StaticResource PlotCardBody}">
                                     <StackPanel DockPanel.Dock="Top">
-                                        <Grid Height="30">
+                                        <Grid Style="{StaticResource PlotCardTitleBar}">
                                             <TextBlock Text="边界电压拟合" ToolTip="边界电压拟合" Style="{StaticResource H3Text}"
                                                        VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                                         </Grid>
                                         <TextBlock Text="{Binding RealtimeBoundaryStats}"
                                                    ToolTip="{Binding RealtimeBoundaryStats}"
-                                                   Style="{StaticResource MonoText}" FontSize="11" Margin="0,2,0,0"
-                                                   TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
-                                                   LineHeight="15" LineStackingStrategy="BlockLineHeight" Height="30" />
+                                                   Style="{StaticResource PlotStatsText}" />
                                     </StackPanel>
-                                    <Border Background="{StaticResource SunkenBrush}" BorderBrush="{StaticResource DividerBrush}"
-                                            BorderThickness="1" CornerRadius="8" Margin="0,10,0,0" Padding="8">
+                                    <Border x:Name="RealtimeBoundaryPlotSurface" Style="{StaticResource PlotSurface}">
                                         <Grid>
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="48" />
@@ -1832,24 +1858,26 @@
                                 </DockPanel>
                             </Border>
 
-                            <Border Grid.Row="2" Grid.Column="2" Style="{StaticResource PanelCard}">
-                                <DockPanel Margin="12">
-                                    <Grid DockPanel.Dock="Top" Height="30">
+                            <Border x:Name="RealtimeReconstructionCard" Grid.Row="0" Grid.RowSpan="3" Grid.Column="0" Style="{StaticResource PanelCard}">
+                                <DockPanel Style="{StaticResource PlotCardBody}">
+                                    <Grid DockPanel.Dock="Top" Style="{StaticResource PlotCardTitleBar}">
                                         <TextBlock Text="重构图像" ToolTip="重构图像" Style="{StaticResource H3Text}"
                                                    VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                                     </Grid>
-                                    <Grid Margin="0,8,0,0">
-                                        <!-- The diagnostics column carries wrapped prose, so it keeps a
-                                             larger share than the square image needs for its Uniform fit. -->
+                                    <Grid Margin="0,6,0,0">
+                                        <!-- The square conductivity image is what operators read here, and it is
+                                             bounded by the card's height rather than its width, so the image
+                                             column only has to be wide enough not to bound it as well. The
+                                             diagnostics prose keeps the width left over. -->
                                         <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="1.25*" />
-                                            <ColumnDefinition Width="12" />
-                                            <ColumnDefinition Width="1*" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="10" />
+                                            <ColumnDefinition Width="{Binding RealtimeDiagnosticsWidth}" />
                                         </Grid.ColumnDefinitions>
                                         <Border Grid.Column="0"
                                                 Background="{StaticResource SunkenBrush}"
                                                 BorderBrush="{StaticResource DividerBrush}"
-                                                BorderThickness="1" CornerRadius="8" Padding="8">
+                                                BorderThickness="1" CornerRadius="8" Padding="4">
                                             <Viewbox x:Name="RealtimeImageViewbox" Stretch="Uniform"
                                                      SizeChanged="ImageSurface_SizeChanged">
                                             <Grid Width="{Binding RoiImageCanvasSize}"
@@ -1968,11 +1996,24 @@
                                                        Height="{Binding RoiImageCanvasSize}"
                                                        Stretch="Uniform"
                                                        SnapsToDevicePixels="True" />
+                                                <StackPanel HorizontalAlignment="Left" VerticalAlignment="Top" Background="#CCF8FAFC" Margin="6">
+                                                    <TextBlock Text="{Binding Pseudo3dUpperLabel}" FontSize="12" FontFamily="Times New Roman" TextAlignment="Center" />
+                                                    <Image Source="{Binding Pseudo3dUpperImage}" Width="100" Height="100" Stretch="Uniform" />
+                                                    <TextBlock Text="{Binding Pseudo3dLowerLabel}" FontSize="12" FontFamily="Times New Roman" TextAlignment="Center" />
+                                                    <Image Source="{Binding Pseudo3dLowerImage}" Width="100" Height="100" Stretch="Uniform" />
+                                                </StackPanel>
+                                                <StackPanel VerticalAlignment="Bottom" Background="#DCF8FAFC" Margin="6">
+                                                    <Border Height="8" Margin="6,0"><Border.Background><LinearGradientBrush StartPoint="0,0.5" EndPoint="1,0.5"><GradientStop Color="#2563EB" Offset="0"/><GradientStop Color="#F8FAFC" Offset="0.5"/><GradientStop Color="#DC2626" Offset="1"/></LinearGradientBrush></Border.Background></Border>
+                                                    <TextBlock Text="{Binding RealtimePseudo3dColorScale}" FontFamily="Times New Roman" FontSize="12" TextAlignment="Center" TextWrapping="Wrap" />
+                                                </StackPanel>
+                                                <Border Visibility="{Binding RealtimePseudo3dWarningVisibility}" Background="#B8000000" Padding="16">
+                                                    <TextBlock Text="{Binding RealtimePseudo3dWarning}" Foreground="White" FontSize="21" TextWrapping="Wrap" TextAlignment="Center" VerticalAlignment="Center" />
+                                                </Border>
                                             </Grid>
                                             </Grid>
                                             </Viewbox>
                                         </Border>
-                                        <ScrollViewer x:Name="RealtimeReconstructionDiagnostics"
+                                        <ScrollViewer x:Name="RealtimeReconstructionDiagnostics" Visibility="{Binding RealtimeDiagnosticsVisibility}" ClipToBounds="True"
                                                       Grid.Column="2"
                                                       VerticalScrollBarVisibility="Auto"
                                                       HorizontalScrollBarVisibility="Disabled">
@@ -2020,7 +2061,7 @@
                     </ScrollViewer>
 
                     <!-- right frame/log panel -->
-                    <Border x:Name="RealtimeRightPane" Grid.Column="2" Background="{StaticResource SurfaceBrush}"
+                    <Border x:Name="RealtimeRightPane" Visibility="{Binding RealtimeHistoryVisibility}" ClipToBounds="True" Grid.Column="2" Background="{StaticResource SurfaceBrush}"
                             BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1,0,0,0">
                         <Grid>
                             <Grid.RowDefinitions>
@@ -2494,6 +2535,21 @@
                                 </DockPanel>
                                 <ListBox ItemsSource="{Binding ExperimentRunsView}" SelectedItem="{Binding SelectedExperimentRun}" Margin="0,12,0,0"
                                          MaxHeight="560" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                                    <ListBox.GroupStyle>
+                                        <GroupStyle>
+                                            <GroupStyle.HeaderTemplate>
+                                                <DataTemplate>
+                                                    <Border Background="#DCEBF8" Padding="10,8" CornerRadius="5"
+                                                            Visibility="{Binding Items[0].IsPseudo3d, Converter={StaticResource BoolToVis}}">
+                                                        <StackPanel>
+                                                            <TextBlock Text="{Binding Name}" FontWeight="Bold" TextWrapping="Wrap" />
+                                                            <TextBlock Text="同组双设备 · 选择下层或上层均可回放整组；单设备检查与导出跟随所选层。" TextWrapping="Wrap" FontSize="11" Margin="0,4,0,0" />
+                                                        </StackPanel>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </GroupStyle.HeaderTemplate>
+                                        </GroupStyle>
+                                    </ListBox.GroupStyle>
                                     <ListBox.ItemTemplate>
                                         <DataTemplate>
                                             <StackPanel>
@@ -2607,10 +2663,14 @@
                                         <TextBlock Text="实验回放" Style="{StaticResource H3Text}" Margin="0,2,0,0" />
                                     </StackPanel>
                                 </DockPanel>
+                                <views:Pseudo3dReplayView DockPanel.Dock="Top"
+                                    DataContext="{Binding DataContext.Pseudo3dReplay, RelativeSource={RelativeSource AncestorType=Window}}" />
                                 <TextBlock DockPanel.Dock="Top"
                                            Text="实时回放只包含采集期间实际完成逆问题并提交到界面的帧；离线回放只使用手动完整重算后发布的全覆盖 revision。两条线路的重构值、显示参数、ROI 与导出相互隔离。"
+                                           Visibility="{Binding DataContext.Pseudo3dReplay.ShowDeviceReplay, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVis}}"
                                            Style="{StaticResource HintText}" Margin="0,8,0,0" />
-                                <Grid Margin="0,12,0,0">
+                                <Grid Margin="0,12,0,0"
+                                      Visibility="{Binding DataContext.Pseudo3dReplay.ShowDeviceReplay, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVis}}">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>

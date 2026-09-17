@@ -11,6 +11,7 @@ internal sealed record RealtimeTimingGateCallbacks(
     Action<string, string> PublishBoundaryFitUnavailable,
     Action<string, string?, string?, string?, string?> PublishQualityAxes,
     Action<RealtimeImagingRunConfig, RealtimeRunState, string> InvalidateProvisionalReference,
+    Action<string, RealtimeReferenceUiChange> NotifyReferenceUi,
     Action<RealtimeRunState> ResetTemporalWindow,
     Func<RealtimeImagingRunConfig, RealtimeRunState, string> CreateReferenceModeStatus);
 
@@ -63,7 +64,7 @@ internal sealed class RealtimeTimingGateController(RealtimeTimingGateCallbacks c
         return true;
     }
 
-    private void BlockProcessing(
+    internal void BlockProcessing(
         RealtimeImagingRunConfig config,
         RealtimeRunState state,
         DdsTimingValidationResult timing,
@@ -71,14 +72,25 @@ internal sealed class RealtimeTimingGateController(RealtimeTimingGateCallbacks c
     {
         state.LowQualityBlocks++;
         state.ConsecutiveLowQualityBlocks++;
+        if (consistency.JustConfirmed || !state.TimingMismatchWarningRaised)
+        {
+            state.AdvanceDynamicKalmanGeneration();
+        }
         callbacks.InvalidateProvisionalReference(config, state, "excitation timing mismatch");
+        if (state.MarkReferenceCandidateContinuityBreak())
+        {
+            callbacks.NotifyReferenceUi(config.SetLabel, RealtimeReferenceUiChange.RefreshWindowsAndAllCommands);
+        }
         state.ReferenceCandidateFrames.Clear();
         Volatile.Write(ref state.ReferenceCandidateStrictGreenCount, 0);
         Interlocked.Exchange(ref state.ManualReferenceLockRequested, 0);
         state.ContactCalibrationFrames.Clear();
         state.ReferenceStationarity.Reset();
         state.LatestReferenceStationarity = null;
-        state.RobustReference = null;
+        if (state.ReferenceVoltage208 is null || state.ReferenceIsProvisional)
+        {
+            state.RobustReference = null;
+        }
         callbacks.ResetTemporalWindow(state);
         if (consistency.JustConfirmed || !state.TimingMismatchWarningRaised)
         {

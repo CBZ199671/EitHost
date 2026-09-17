@@ -1,4 +1,5 @@
 using EitHost.Core.Demodulation;
+using EitHost.Core.Acquisition;
 using EitHost.Core.Hardware.Usb2070;
 using EitHost.Core.Storage.Hdf5;
 using PureHDF;
@@ -63,10 +64,11 @@ public sealed class ExperimentDemodCatchUpService
         long discardedRawRows = 0;
         long clockAnchorSampleIndex = 0;
         var clockAnchorAt = run.StartedAt;
+        var finiteBursts = new HashSet<long>();
 
-        void PersistAvailableBlocks()
+        void PersistAvailableBlocks(IEnumerable<RealtimeDemodulatedBlock>? finiteBlocks = null)
         {
-            foreach (var replayedBlock in demodulator!.ProcessAvailableBlocks())
+            foreach (var replayedBlock in finiteBlocks ?? demodulator!.ProcessAvailableBlocks())
             {
                 var range = (replayedBlock.StartSampleIndex, replayedBlock.EndSampleIndex);
                 if (readyRanges.Any(ready => RangesOverlap(ready, range)))
@@ -75,13 +77,16 @@ public sealed class ExperimentDemodCatchUpService
                     continue;
                 }
 
-                var blockNumber = SelectBlockNumber(
+                var blockNumber = replayedBlock.TimeDivision is { } finiteStamp ? checked((int)finiteStamp.Round) : SelectBlockNumber(
                     replayedBlock,
                     existing,
                     usedBlockNumbers,
                     ref nextBlockNumber);
                 var block = replayedBlock with { BlockNumber = blockNumber };
-                var acquiredAt = clockAnchorAt + TimeSpan.FromSeconds(
+                if (block.TimeDivision is not null && existing.Any(item => item.BlockNumber == blockNumber &&
+                    (item.SourceStartSampleIndex != block.StartSampleIndex || item.SourceEndSampleIndex != block.EndSampleIndex)))
+                    throw new InvalidDataException("Finite scan round is already assigned to different raw samples.");
+                var acquiredAt = block.TimeDivision?.SampleMidpoint ?? clockAnchorAt + TimeSpan.FromSeconds(
                     (block.StartSampleIndex - clockAnchorSampleIndex) / (double)settings!.SampleRateHz);
                 var processedAt = DateTimeOffset.UtcNow;
                 var outputPath = layout.GetDerivedBlockPath(run.RunDirectory, blockNumber);
@@ -203,6 +208,31 @@ public sealed class ExperimentDemodCatchUpService
                 var cursor = segment.StartSampleIndex;
                 foreach (var discontinuity in discontinuities)
                 {
+                    if (Pseudo3dFiniteScanProvenance.Parse(discontinuity.Reason) is { } finite)
+                    {
+                        if (discontinuity.StartSampleIndex < finite.RawStart || discontinuity.EndSampleIndex > finite.RawEnd)
+                            throw new InvalidDataException("Finite scan marker is outside its declared raw burst.");
+                        if (finiteBursts.Add(finite.RawStart))
+                        {
+                            var raw = ReadFiniteRaw(finite, segments, settings, cancellationToken);
+                            var replayed = Pseudo3dFiniteScanDemodulator.Demodulate(raw, settings, finite.Window).Block;
+                            var midpoint = finite.Stamp.CaptureStartedAt + TimeSpan.FromSeconds(
+                                (replayed.StartSampleIndex + replayed.PeakLocations[0] + replayed.EndSampleIndex) / 2.0 / settings.SampleRateHz);
+                            var block = replayed with
+                            {
+                                StartSampleIndex = finite.RawStart + replayed.StartSampleIndex,
+                                EndSampleIndex = finite.RawStart + replayed.EndSampleIndex,
+                                TimeDivision = finite.Stamp with { SampleMidpoint = midpoint, Qualified = replayed.IsHighQuality }
+                            };
+                            PersistAvailableBlocks([block]);
+                        }
+                        var analysisRows = Math.Max(0, Math.Min(discontinuity.EndSampleIndex, finite.AnalysisEnd) -
+                            Math.Max(discontinuity.StartSampleIndex, finite.AnalysisStart));
+                        discardedRawRows += discontinuity.EndSampleIndex - discontinuity.StartSampleIndex - analysisRows;
+                        demodulator.ResetForDiscontinuity(discontinuity.EndSampleIndex);
+                        cursor = discontinuity.EndSampleIndex;
+                        continue;
+                    }
                     discardedRawRows = checked(
                         discardedRawRows +
                         discontinuity.EndSampleIndex - discontinuity.StartSampleIndex);
@@ -269,6 +299,32 @@ public sealed class ExperimentDemodCatchUpService
             throw new InvalidOperationException(
                 $"Catch-up requires a terminal experiment run; current status is '{run.Status}'.");
         }
+    }
+
+    private ushort[,] ReadFiniteRaw(Pseudo3dFiniteScanProvenance finite, IReadOnlyList<RawSegmentCatalogRecord> segments,
+        RealtimeDemodulationSettings settings, CancellationToken cancellationToken)
+    {
+        var raw = new ushort[checked((int)(finite.RawEnd - finite.RawStart)), 16];
+        var cursor = finite.RawStart;
+        foreach (var segment in segments.Where(s => s.EndSampleIndex > finite.RawStart && s.StartSampleIndex < finite.RawEnd))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (segment.StartSampleIndex > cursor) throw new InvalidDataException("Finite scan raw crosses a missing segment.");
+            var path = layout.ResolveArtifactPath(segment.ArtifactPath);
+            using (var file = Hdf5FileAccess.OpenReadWithRetry(path))
+            {
+                ValidateSegmentIdentity(file, segment);
+                if (!SettingsMatch(settings, ReadSettings(file))) throw new InvalidDataException("Finite scan settings change across raw segments.");
+            }
+            var end = Math.Min(finite.RawEnd, segment.EndSampleIndex);
+            foreach (var chunk in rawReader.ReadRange(path, cursor - segment.StartSampleIndex, end - cursor))
+            {
+                Buffer.BlockCopy(chunk.Values, 0, raw, checked((int)(cursor - finite.RawStart) * 32), chunk.Values.Length * 2);
+                cursor += chunk.Values.GetLength(0);
+            }
+        }
+        if (cursor != finite.RawEnd) throw new InvalidDataException("Finite scan raw tail is incomplete.");
+        return raw;
     }
 
     private static void ValidateSegmentIdentity(IH5Group file, RawSegmentCatalogRecord segment)

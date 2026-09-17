@@ -16,7 +16,8 @@ internal sealed record RealtimePreviewCallbacks(
     Func<string> ImagePolarity,
     Func<double> ImageGain,
     Action ReferencePresentationChanged,
-    Action<string> AddDiagnostic);
+    Action<string> AddDiagnostic,
+    Func<bool>? AuxiliaryVisible = null);
 
 internal sealed class RealtimePreviewController
 {
@@ -102,7 +103,19 @@ internal sealed class RealtimePreviewController
         ShouldUpdate(ref state.LastDemodPreviewTicks, DemodPreviewInterval);
 
     internal static bool ShouldUpdateImagePreview(RealtimeRunState state) =>
-        ShouldUpdate(ref state.LastImagePreviewTicks, ImagePreviewInterval);
+        TryClaimImagePreviewSlot(ref state.LastImagePreviewTicks, Stopwatch.GetTimestamp());
+
+    internal static bool TryClaimImagePreviewSlot(ref long lastSlotTicks, long now)
+    {
+        var previous = Interlocked.Read(ref lastSlotTicks);
+        var interval = (long)(ImagePreviewInterval.TotalSeconds * Stopwatch.Frequency);
+        // Advance a 10 Hz phase rather than restarting a 100 ms stopwatch on every
+        // arrival. Otherwise ordinary 98/102 ms jitter discards every second frame.
+        // A quarter-slot tolerance admits jitter, but cannot raise sustained FPS.
+        if (previous != 0 && now - previous < interval * 3 / 4) return false;
+        var next = previous == 0 || now - previous >= interval * 2 ? now : previous + interval;
+        return Interlocked.CompareExchange(ref lastSlotTicks, next, previous) == previous;
+    }
 
     internal static bool ShouldUpdateRoiPreview(RealtimeRunState state) =>
         ShouldUpdate(ref state.LastRoiPreviewTicks, RoiPreviewInterval);
@@ -125,6 +138,25 @@ internal sealed class RealtimePreviewController
     internal void PublishReconstructionActivity(string setLabel, string activity)
     {
         stateStore.PublishReconstructionActivity(setLabel, callbacks.IsDisplayedSet(setLabel), activity);
+        RequestFlush();
+    }
+
+    internal void PublishReconstructionActivityIfCurrent(
+        string setLabel,
+        string activity,
+        RealtimeRunState state,
+        int dynamicGeneration,
+        int referenceEpoch)
+    {
+        var displayed = callbacks.IsDisplayedSet(setLabel);
+        if (!state.TryCommitReconstructionState(
+                dynamicGeneration,
+                referenceEpoch,
+                () => stateStore.PublishReconstructionActivity(setLabel, displayed, activity)))
+        {
+            return;
+        }
+
         RequestFlush();
     }
 
@@ -185,6 +217,7 @@ internal sealed class RealtimePreviewController
                 RenderBoundaryFit: false,
                 RenderImage: true,
                 state.ReferenceEpoch,
+                state.DynamicKalmanGeneration,
                 NeutralPresentation: new RealtimeNeutralImagePresentation(stats, activity),
                 NonReplaceable: true)) != true)
         {
@@ -234,6 +267,34 @@ internal sealed class RealtimePreviewController
         RequestFlush();
     }
 
+    internal void PublishQualityAxesIfCurrent(
+        string setLabel,
+        RealtimeRunState state,
+        int dynamicGeneration,
+        int referenceEpoch,
+        string? dataQuality = null,
+        string? referenceMode = null,
+        string? reconstructionQuality = null,
+        string? roiReadiness = null)
+    {
+        var displayed = callbacks.IsDisplayedSet(setLabel);
+        if (!state.TryCommitReconstructionState(
+                dynamicGeneration,
+                referenceEpoch,
+                () => stateStore.PublishQualityAxes(
+                    setLabel,
+                    displayed,
+                    dataQuality,
+                    referenceMode,
+                    reconstructionQuality,
+                    roiReadiness)))
+        {
+            return;
+        }
+
+        RequestFlush();
+    }
+
     internal void QueueLog(string line)
     {
         stateStore.QueueLog(line, CoalescedLogLimit);
@@ -251,6 +312,7 @@ internal sealed class RealtimePreviewController
         RealtimeRunState state,
         RealtimeDemodulatedBlock block)
     {
+        if (callbacks.AuxiliaryVisible?.Invoke() == false) return;
         if (!ShouldUpdatePreview(state))
         {
             return;
@@ -331,6 +393,7 @@ internal sealed class RealtimePreviewController
 
     internal void PublishSignal(string setLabel, RealtimeSignalPreviewSource source, string summary)
     {
+        if (callbacks.AuxiliaryVisible?.Invoke() == false) return;
         stateStore.PublishSignal(
             setLabel,
             callbacks.IsDisplayedSet(setLabel),
@@ -409,24 +472,28 @@ internal sealed class RealtimePreviewController
         }
 
         var result = item.Result ?? throw new InvalidOperationException("Reconstruction visualization requires a result.");
-        if (item.ReferenceEpoch != state.ReferenceEpoch)
+        if (!IsVisualizationCurrent(config.SetLabel, state, item, result, "before-render"))
         {
-            callbacks.AddDiagnostic(
-                $"{config.SetLabel} discard stale visualization block={result.BlockNumber} " +
-                $"reference-epoch={item.ReferenceEpoch}->{state.ReferenceEpoch}");
             return;
         }
 
         if (item.RenderBoundaryFit)
         {
-            PublishBoundary(
-                config.SetLabel,
-                RealtimeVisualizationProjection.CreateRealtimeBoundaryFitPreviewSnapshot(
-                    result,
-                    item.Reference,
-                    item.Target,
-                    config.DifferenceOrientation,
-                    item.TemplateDisplayPackage));
+            var boundary = RealtimeVisualizationProjection.CreateRealtimeBoundaryFitPreviewSnapshot(
+                result,
+                item.Reference,
+                item.Target,
+                config.DifferenceOrientation,
+                item.TemplateDisplayPackage);
+            if (!IsVisualizationCurrent(config.SetLabel, state, item, result, "boundary-publish"))
+            {
+                return;
+            }
+
+            if (!PublishBoundaryIfCurrent(config.SetLabel, boundary, state, item))
+            {
+                return;
+            }
         }
 
         if (!item.RenderImage)
@@ -450,6 +517,12 @@ internal sealed class RealtimePreviewController
                 imageGain,
                 item.ContactResult?.States,
                 ImageRenderPixelSize)).Image;
+        if (!IsVisualizationCurrent(config.SetLabel, state, item, result, "image-publish"))
+        {
+            state.ImageRasterCache.ResetColorScale();
+            return;
+        }
+
         var renderMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         state.RenderEwmaMilliseconds = state.RenderEwmaMilliseconds <= 0.0
             ? renderMilliseconds
@@ -517,10 +590,12 @@ internal sealed class RealtimePreviewController
                     LowConfidence: lowConfidence,
                     Stats: stats))
             : null;
-        PublishImage(
+        _ = PublishImageIfCurrent(
             config.SetLabel,
             new RealtimeImagePreviewSnapshot(image, stats, lowConfidence, liveCommit),
-            ComposeImagingSummary(config.SetLabel, state));
+            ComposeImagingSummary(config.SetLabel, state),
+            state,
+            item);
     }
 
     internal void ProcessNeutralVisualization(
@@ -529,17 +604,93 @@ internal sealed class RealtimePreviewController
         RealtimeVisualizationWorkItem item,
         RealtimeNeutralImagePresentation neutral)
     {
-        if (item.ReferenceEpoch != state.ReferenceEpoch)
+        if (!state.IsReconstructionContextCurrent(item.DynamicGeneration, item.ReferenceEpoch))
         {
             return;
         }
 
         var neutralImage = state.ImageRasterCache.RenderNeutral(item.ContactResult?.States, ImageRenderPixelSize);
-        PublishImage(
-            setLabel,
-            new RealtimeImagePreviewSnapshot(neutralImage, neutral.Stats, LowConfidence: false),
-            null);
-        PublishReconstructionActivity(setLabel, neutral.Activity);
+        if (!state.IsReconstructionContextCurrent(item.DynamicGeneration, item.ReferenceEpoch))
+        {
+            return;
+        }
+
+        var displayed = callbacks.IsDisplayedSet(setLabel);
+        if (!state.TryCommitReconstructionState(
+                item.DynamicGeneration,
+                item.ReferenceEpoch,
+                () =>
+                {
+                    stateStore.PublishImage(
+                        setLabel,
+                        displayed,
+                        new RealtimeImagePreviewSnapshot(neutralImage, neutral.Stats, LowConfidence: false),
+                        null);
+                    stateStore.PublishReconstructionActivity(setLabel, displayed, neutral.Activity);
+                }))
+        {
+            return;
+        }
+
+        RequestFlush();
+    }
+
+    private bool PublishBoundaryIfCurrent(
+        string setLabel,
+        RealtimeBoundaryFitPreviewSnapshot snapshot,
+        RealtimeRunState state,
+        RealtimeVisualizationWorkItem item)
+    {
+        var displayed = callbacks.IsDisplayedSet(setLabel);
+        if (!state.TryCommitReconstructionState(
+                item.DynamicGeneration,
+                item.ReferenceEpoch,
+                () => stateStore.PublishBoundary(setLabel, displayed, snapshot)))
+        {
+            return false;
+        }
+
+        RequestFlush();
+        return true;
+    }
+
+    private bool PublishImageIfCurrent(
+        string setLabel,
+        RealtimeImagePreviewSnapshot snapshot,
+        string? summary,
+        RealtimeRunState state,
+        RealtimeVisualizationWorkItem item)
+    {
+        var displayed = callbacks.IsDisplayedSet(setLabel);
+        if (!state.TryCommitReconstructionState(
+                item.DynamicGeneration,
+                item.ReferenceEpoch,
+                () => stateStore.PublishImage(setLabel, displayed, snapshot, summary)))
+        {
+            return false;
+        }
+
+        RequestFlush();
+        return true;
+    }
+
+    private bool IsVisualizationCurrent(
+        string setLabel,
+        RealtimeRunState state,
+        RealtimeVisualizationWorkItem item,
+        RealtimeReconstructionResult result,
+        string stage)
+    {
+        if (state.IsReconstructionContextCurrent(item.DynamicGeneration, item.ReferenceEpoch))
+        {
+            return true;
+        }
+
+        callbacks.AddDiagnostic(
+            $"{setLabel} discard stale visualization block={result.BlockNumber} stage={stage} " +
+            $"reference-epoch={item.ReferenceEpoch}->{state.ReferenceEpoch} " +
+            $"generation={item.DynamicGeneration}->{state.DynamicKalmanGeneration} invalidated={state.ReferenceInvalidated}");
+        return false;
     }
 
     internal static string ComposeImagingSummary(string setLabel, RealtimeRunState state)

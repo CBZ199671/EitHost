@@ -173,6 +173,11 @@ internal sealed record RealtimeImagingRunConfig(
     string PairingMapSummary,
     string ReferenceScalePolicy)
 {
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal Workspaces.Pseudo3dAcquisitionGroup? TimeDivisionGroup { get; init; }
+    public Guid? TimeDivisionSessionId => TimeDivisionGroup?.SessionId;
+    public string? TimeDivisionProfile => TimeDivisionGroup is null ? null : Pseudo3dAcquisitionProfile.Version;
+
     internal bool PersistRawAcquisitionHdf5 => StoragePolicy.PersistContinuousRaw;
 
     internal bool PersistImagingFrames => StoragePolicy.PersistImagingFrames;

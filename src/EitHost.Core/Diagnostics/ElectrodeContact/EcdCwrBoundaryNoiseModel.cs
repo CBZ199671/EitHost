@@ -15,7 +15,8 @@ public sealed record EcdCwrBoundaryNoiseModelOptions(
     double MinimumPrecisionWeight = 0.05,
     double PhysicalAdcLsbVolts = 10.0 / ushort.MaxValue,
     double MinimumPostDemodulationScaleLsb = 0.02,
-    bool DetrendLinearTrend = false);
+    bool DetrendLinearTrend = false,
+    bool UseShortTermResiduals = false);
 
 public sealed record EcdCwrBoundaryNoiseModel(
     double[] CenterVoltage208,
@@ -68,6 +69,8 @@ public sealed record EcdCwrBoundaryNoiseModel(
 
 public sealed class EcdCwrBoundaryNoiseModelBuilder
 {
+    public const string ShortTermResidualPolicy = "short_term_second_difference-v1";
+
     public EcdCwrBoundaryNoiseModel Create(
         IReadOnlyList<double[]> referenceVoltageFrames,
         EcdCwrBoundaryNoiseModelOptions? options = null,
@@ -76,13 +79,13 @@ public sealed class EcdCwrBoundaryNoiseModelBuilder
         ArgumentNullException.ThrowIfNull(referenceVoltageFrames);
         options ??= new EcdCwrBoundaryNoiseModelOptions();
         ValidateOptions(options);
-        if (referenceVoltageFrames.Count < 2 ||
+        if (referenceVoltageFrames.Count < (options.UseShortTermResiduals ? 3 : 2) ||
             referenceVoltageFrames.Any(vector =>
                 vector.Length != DemodulatedFrame.FlattenedMeasurementCount ||
                 vector.Any(value => !double.IsFinite(value))))
         {
             throw new ArgumentException(
-                "Boundary-noise model requires at least two finite 208-point reference frames.",
+                "Boundary-noise model requires finite 208-point reference frames (at least three for short-term residuals, otherwise two).",
                 nameof(referenceVoltageFrames));
         }
 
@@ -96,16 +99,36 @@ public sealed class EcdCwrBoundaryNoiseModelBuilder
         }
 
         var center = centerVoltage208?.ToArray() ?? ChannelMedian(referenceVoltageFrames);
-        var noiseFrames = options.DetrendLinearTrend
-            ? DetrendLinear(referenceVoltageFrames)
-            : referenceVoltageFrames.Select(vector => vector.ToArray()).ToArray();
-        var noiseCenter = options.DetrendLinearTrend
-            ? new double[DemodulatedFrame.FlattenedMeasurementCount]
-            : center;
+        var noiseFrames = options.UseShortTermResiduals
+            ? ShortTermResiduals(referenceVoltageFrames)
+            : options.DetrendLinearTrend
+                ? DetrendLinear(referenceVoltageFrames)
+                : referenceVoltageFrames.Select(vector => vector.ToArray()).ToArray();
+        var noiseCenter = options.UseShortTermResiduals
+            ? ChannelMedian(noiseFrames)
+            : options.DetrendLinearTrend
+                ? new double[DemodulatedFrame.FlattenedMeasurementCount]
+                : center;
         var scale = ChannelScale(noiseFrames, noiseCenter, options);
+        if (options.UseShortTermResiduals)
+        {
+            for (var channel = 0; channel < scale.Length; channel++)
+            {
+                scale[channel] = Math.Max(scale[channel], Math.Abs(center[channel]) * options.RelativeScaleFloor);
+            }
+        }
         var scores = noiseFrames
             .Select(vector => CalculateGlobalScore(vector, noiseCenter, scale))
             .ToArray();
+        if (options.UseShortTermResiduals)
+        {
+            // Sparse reference transients are not stationary noise. A raw P99.5
+            // of their scores otherwise turns an immutable noise gate blind.
+            var medianScore = Quantile(scores, 0.5);
+            var scoreMad = Quantile(scores.Select(score => Math.Abs(score - medianScore)).ToArray(), 0.5);
+            var transientCutoff = Math.Max(options.MinimumGlobalScoreThreshold, medianScore + 4.5 * 1.4826 * scoreMad);
+            scores = scores.Where(score => score <= transientCutoff).ToArray();
+        }
         var threshold = Math.Max(
             options.MinimumGlobalScoreThreshold,
             Quantile(scores, options.EmpiricalQuantile) * options.ThresholdExpansionFactor);
@@ -124,9 +147,31 @@ public sealed class EcdCwrBoundaryNoiseModelBuilder
             threshold,
             options.EmpiricalQuantile,
             referenceVoltageFrames.Count,
-            options.DetrendLinearTrend
-                ? "linear_detrended_residual-v1"
-                : "raw_reference_dispersion-v1");
+            options.UseShortTermResiduals
+                ? ShortTermResidualPolicy
+                : options.DetrendLinearTrend
+                    ? "linear_detrended_residual-v1"
+                    : "raw_reference_dispersion-v1");
+    }
+
+    private static double[][] ShortTermResiduals(IReadOnlyList<double[]> vectors)
+    {
+        // The centered second difference removes a local linear trend; its
+        // independent-noise variance is (1 + 4 + 1) sigma². This affects noise
+        // training only. The frozen reference and later physical targets stay intact.
+        var normalization = Math.Sqrt(6.0);
+        var residuals = new double[vectors.Count - 2][];
+        for (var frame = 1; frame < vectors.Count - 1; frame++)
+        {
+            var residual = new double[DemodulatedFrame.FlattenedMeasurementCount];
+            for (var channel = 0; channel < residual.Length; channel++)
+            {
+                residual[channel] = (vectors[frame - 1][channel] - 2 * vectors[frame][channel] +
+                    vectors[frame + 1][channel]) / normalization;
+            }
+            residuals[frame - 1] = residual;
+        }
+        return residuals;
     }
 
     private static double[][] DetrendLinear(IReadOnlyList<double[]> vectors)
@@ -278,12 +323,13 @@ public sealed record EcdCwrBoundaryChangeReconstructionDisposition(
     bool UseZeroDifferenceInput)
 {
     public static EcdCwrBoundaryChangeReconstructionDisposition FromDecision(
-        EcdCwrBoundaryChangeDecision decision)
+        EcdCwrBoundaryChangeDecision decision,
+        bool requireCurrentNeutralLayer = false)
     {
         ArgumentNullException.ThrowIfNull(decision);
         var trustedChange = decision.Action == EcdCwrBoundaryChangeAction.Change;
         return new EcdCwrBoundaryChangeReconstructionDisposition(
-            ScheduleInverseReconstruction: trustedChange,
+            ScheduleInverseReconstruction: trustedChange || requireCurrentNeutralLayer,
             RenderNeutralTrustedImage: !trustedChange,
             HoldDynamicState: !trustedChange,
             UseZeroDifferenceInput: !trustedChange);

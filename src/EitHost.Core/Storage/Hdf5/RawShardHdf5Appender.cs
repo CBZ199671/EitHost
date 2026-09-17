@@ -131,6 +131,7 @@ internal sealed class RawShardHdf5Appender
                 "/metadata",
                 RawSegmentHdf5Writer.CreateMetadataGroup(metadata));
             UpdateStorageMetadata(file, context, rows);
+            Hdf5IncrementalStageAppender.ReplaceContentValue(file, "/metadata/run/compression_policy", RawCompressionPolicy.Id);
             EnsureSuccess(H5F.flush(file, H5F.scope_t.GLOBAL), "flush new raw shard");
         }
         catch (Exception ex)
@@ -173,8 +174,11 @@ internal sealed class RawShardHdf5Appender
                     2,
                     [checked((ulong)Math.Min(context.CapacityRows, chunkRows)), checked((ulong)channelCount)]),
                 "set raw shard chunks");
-            EnsureSuccess(H5P.set_shuffle(creation), "set raw shard shuffle");
-            EnsureSuccess(H5P.set_deflate(creation, 1), "set raw shard deflate");
+            if (RawCompressionPolicy.ShouldCompress(values.AsSpan(valueOffset, valueCount)))
+            {
+                EnsureSuccess(H5P.set_shuffle(creation), "set raw shard shuffle");
+                EnsureSuccess(H5P.set_deflate(creation, 1), "set raw shard deflate");
+            }
             dataset = H5D.create(
                 file,
                 "/raw/adc_counts",

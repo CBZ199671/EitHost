@@ -93,8 +93,9 @@ public sealed class DdsSerialPortTransport : IDdsSerialTransport, IDisposable
         }
 
         throw new TimeoutException(
-            $"DDS firmware v2 response was not received within {responseTimeoutMs} ms; " +
-            "flash the matching AD9106 firmware and reconnect the COM port.");
+            $"No valid DDS protocol v2 response within {responseTimeoutMs} ms. " +
+            "Check controller power, reset/run switch position, and the COM port before checking firmware compatibility. " +
+            "A detected COM port does not prove the controller is running.");
     }
 
     private void EnsureOpen()

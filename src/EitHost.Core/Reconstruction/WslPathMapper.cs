@@ -7,7 +7,7 @@ public static partial class WslPathMapper
     public static string ToWslPath(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        var fullPath = Path.GetFullPath(path);
+        var fullPath = Path.GetFullPath(NormalizeExtendedWindowsPath(path));
         var wslMatch = WslUncRegex().Match(fullPath);
         if (wslMatch.Success)
         {
@@ -35,7 +35,7 @@ public static partial class WslPathMapper
             return false;
         }
 
-        var wslMatch = WslUncRegex().Match(Path.GetFullPath(path));
+        var wslMatch = WslUncRegex().Match(Path.GetFullPath(NormalizeExtendedWindowsPath(path)));
         if (!wslMatch.Success)
         {
             return false;
@@ -52,6 +52,23 @@ public static partial class WslPathMapper
         ArgumentException.ThrowIfNullOrWhiteSpace(linuxPath);
         var normalized = linuxPath.Trim().Replace('\\', '/').TrimStart('/');
         return $@"\\wsl.localhost\{distroName.Trim()}\{normalized.Replace('/', '\\')}";
+    }
+
+    private static string NormalizeExtendedWindowsPath(string path)
+    {
+        const string extendedUncPrefix = @"\\?\UNC\";
+        if (path.StartsWith(extendedUncPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return @"\\" + path[extendedUncPrefix.Length..];
+        }
+
+        const string extendedDrivePrefix = @"\\?\";
+        return path.StartsWith(extendedDrivePrefix, StringComparison.OrdinalIgnoreCase)
+            && path.Length >= extendedDrivePrefix.Length + 2
+            && char.IsAsciiLetter(path[extendedDrivePrefix.Length])
+            && path[extendedDrivePrefix.Length + 1] == ':'
+                ? path[extendedDrivePrefix.Length..]
+                : path;
     }
 
     [GeneratedRegex(@"^\\\\wsl(?:\.localhost|\$)?\\(?<distro>[^\\]+)(?:\\(?<path>.*))?$", RegexOptions.IgnoreCase)]

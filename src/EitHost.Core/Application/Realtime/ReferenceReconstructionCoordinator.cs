@@ -30,7 +30,9 @@ public sealed record ReferenceReconstructionSnapshot(
 
 public class ReferenceReconstructionCoordinator
 {
+    private static long nextReconstructionCoordinatorId;
     private readonly object reconstructionGate = new();
+    private readonly long reconstructionCoordinatorId = Interlocked.Increment(ref nextReconstructionCoordinatorId);
     private long snapshotRevision;
     private string lastSnapshotReason = "created";
 
@@ -245,7 +247,8 @@ public class ReferenceReconstructionCoordinator
         ArgumentNullException.ThrowIfNull(taskFactory);
         lock (reconstructionGate)
         {
-            if (ReconstructionSuspended ||
+            if (ReferenceInvalidated ||
+                ReconstructionSuspended ||
                 ReconstructionTask is { IsCompleted: false } ||
                 !ReconstructionCadence.TrySchedule())
             {
@@ -263,6 +266,11 @@ public class ReferenceReconstructionCoordinator
 
     public int RecordReconstructionSuccess(TimeSpan backendElapsed, bool degraded)
     {
+        if (ReferenceInvalidated)
+        {
+            return Volatile.Read(ref ReconstructionFrames);
+        }
+
         var completedFrames = Interlocked.Increment(ref ReconstructionFrames);
         if (completedFrames > 1)
         {
@@ -280,6 +288,26 @@ public class ReferenceReconstructionCoordinator
         return completedFrames;
     }
 
+    public bool TryRecordReconstructionSuccess(
+        int expectedDynamicGeneration,
+        int expectedReferenceEpoch,
+        TimeSpan backendElapsed,
+        bool degraded,
+        out int completedFrames)
+    {
+        lock (reconstructionGate)
+        {
+            if (!IsReconstructionContextCurrentCore(expectedDynamicGeneration, expectedReferenceEpoch))
+            {
+                completedFrames = Volatile.Read(ref ReconstructionFrames);
+                return false;
+            }
+
+            completedFrames = RecordReconstructionSuccess(backendElapsed, degraded);
+            return true;
+        }
+    }
+
     public int RecordReconstructionFailure(string message, int suspensionThreshold)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(message);
@@ -294,11 +322,181 @@ public class ReferenceReconstructionCoordinator
         return failures;
     }
 
+    public bool TryRecordReconstructionFailure(
+        int expectedDynamicGeneration,
+        int expectedReferenceEpoch,
+        string message,
+        int suspensionThreshold,
+        out int failures)
+    {
+        lock (reconstructionGate)
+        {
+            if (!IsReconstructionContextCurrentCore(expectedDynamicGeneration, expectedReferenceEpoch))
+            {
+                failures = Volatile.Read(ref ConsecutiveReconstructionFailures);
+                return false;
+            }
+
+            failures = RecordReconstructionFailure(message, suspensionThreshold);
+            return true;
+        }
+    }
+
+    public bool IsReconstructionContextCurrent(
+        int expectedDynamicGeneration,
+        int expectedReferenceEpoch)
+    {
+        lock (reconstructionGate)
+        {
+            return IsReconstructionContextCurrentCore(expectedDynamicGeneration, expectedReferenceEpoch);
+        }
+    }
+
+    public bool TryAdvanceDynamicKalmanGeneration(
+        int expectedDynamicGeneration,
+        int expectedReferenceEpoch,
+        bool forceSafeImage,
+        out int resultingGeneration)
+    {
+        lock (reconstructionGate)
+        {
+            if (!IsReconstructionContextCurrentCore(expectedDynamicGeneration, expectedReferenceEpoch))
+            {
+                resultingGeneration = DynamicKalmanGeneration;
+                return false;
+            }
+
+            if (forceSafeImage)
+            {
+                DynamicKalmanForceSafeImage = true;
+            }
+
+            resultingGeneration = ++DynamicKalmanGeneration;
+            DynamicKalmanResetPending = true;
+            return true;
+        }
+    }
+
+    public int AdvanceDynamicKalmanGeneration(bool forceSafeImage = false)
+    {
+        lock (reconstructionGate)
+        {
+            if (forceSafeImage)
+            {
+                DynamicKalmanForceSafeImage = true;
+            }
+
+            var resultingGeneration = ++DynamicKalmanGeneration;
+            DynamicKalmanResetPending = true;
+            return resultingGeneration;
+        }
+    }
+
+    public int BeginReferenceTransition()
+    {
+        lock (reconstructionGate)
+        {
+            var resultingGeneration = ++DynamicKalmanGeneration;
+            DynamicKalmanResetPending = true;
+            return resultingGeneration;
+        }
+    }
+
+    public bool TryClearDynamicKalmanResetPending(
+        int expectedDynamicGeneration,
+        int expectedReferenceEpoch)
+    {
+        lock (reconstructionGate)
+        {
+            if (!IsReconstructionContextCurrentCore(expectedDynamicGeneration, expectedReferenceEpoch))
+            {
+                return false;
+            }
+
+            DynamicKalmanResetPending = false;
+            return true;
+        }
+    }
+
+    public bool TryCommitReconstructionState(
+        int expectedDynamicGeneration,
+        int expectedReferenceEpoch,
+        Action commit)
+    {
+        ArgumentNullException.ThrowIfNull(commit);
+        lock (reconstructionGate)
+        {
+            if (!IsReconstructionContextCurrentCore(expectedDynamicGeneration, expectedReferenceEpoch))
+            {
+                return false;
+            }
+
+            commit();
+            return true;
+        }
+    }
+
+    public static bool TryCommitReconstructionPair(
+        ReferenceReconstructionCoordinator left,
+        int leftDynamicGeneration,
+        int leftReferenceEpoch,
+        ReferenceReconstructionCoordinator right,
+        int rightDynamicGeneration,
+        int rightReferenceEpoch,
+        Action commit)
+    {
+        ArgumentNullException.ThrowIfNull(left);
+        ArgumentNullException.ThrowIfNull(right);
+        ArgumentNullException.ThrowIfNull(commit);
+        if (ReferenceEquals(left, right))
+        {
+            lock (left.reconstructionGate)
+            {
+                if (!left.IsReconstructionContextCurrentCore(leftDynamicGeneration, leftReferenceEpoch) ||
+                    !left.IsReconstructionContextCurrentCore(rightDynamicGeneration, rightReferenceEpoch))
+                {
+                    return false;
+                }
+
+                commit();
+                return true;
+            }
+        }
+
+        var first = left.reconstructionCoordinatorId < right.reconstructionCoordinatorId ? left : right;
+        var second = ReferenceEquals(first, left) ? right : left;
+        lock (first.reconstructionGate)
+        {
+            lock (second.reconstructionGate)
+            {
+                if (!left.IsReconstructionContextCurrentCore(leftDynamicGeneration, leftReferenceEpoch) ||
+                    !right.IsReconstructionContextCurrentCore(rightDynamicGeneration, rightReferenceEpoch))
+                {
+                    return false;
+                }
+
+                commit();
+                return true;
+            }
+        }
+    }
+
+    private bool IsReconstructionContextCurrentCore(
+        int expectedDynamicGeneration,
+        int expectedReferenceEpoch) =>
+        !ReferenceInvalidated &&
+        DynamicKalmanGeneration == expectedDynamicGeneration &&
+        ReferenceEpoch == expectedReferenceEpoch;
+
     public void ResetReconstructionCircuitBreaker(string reason)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(reason);
-        Interlocked.Exchange(ref ConsecutiveReconstructionFailures, 0);
-        ReconstructionSuspended = false;
+        lock (reconstructionGate)
+        {
+            Interlocked.Exchange(ref ConsecutiveReconstructionFailures, 0);
+            ReconstructionSuspended = ReferenceInvalidated;
+        }
+
         PublishSnapshot(reason.Trim());
     }
 
@@ -311,25 +509,54 @@ public class ReferenceReconstructionCoordinator
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(blockNumber);
         ArgumentOutOfRangeException.ThrowIfNegative(startSampleIndex);
         ArgumentException.ThrowIfNullOrWhiteSpace(lockKind);
-        ReferenceBlockNumber = blockNumber;
-        ReferenceStartSampleIndex = startSampleIndex;
-        ReferenceEpoch++;
-        ReferenceLockedAt = lockedAt;
-        ActiveReferenceLockKind = lockKind.Trim();
-        ActiveReferenceActionGroupId = null;
-        ActiveReferenceCommonActionAt = null;
-        ActiveReferenceWindowSkewMilliseconds = null;
-        ActiveReferenceSwitchSkewMilliseconds = null;
-        ActiveReferenceSynchronizedSetCount = 1;
+        lock (reconstructionGate)
+        {
+            ReferenceBlockNumber = blockNumber;
+            ReferenceStartSampleIndex = startSampleIndex;
+            ReferenceEpoch++;
+            ReferenceLockedAt = lockedAt;
+            ActiveReferenceLockKind = lockKind.Trim();
+            ActiveReferenceActionGroupId = null;
+            ActiveReferenceCommonActionAt = null;
+            ActiveReferenceWindowSkewMilliseconds = null;
+            ActiveReferenceSwitchSkewMilliseconds = null;
+            ActiveReferenceSynchronizedSetCount = 1;
+            ReferenceInvalidated = false;
+        }
+
         PublishSnapshot("reference_epoch_activated");
     }
 
     public void InvalidateReference(string reason)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(reason);
-        ReferenceInvalidated = true;
-        ReconstructionSuspended = true;
+        lock (reconstructionGate)
+        {
+            ReferenceInvalidated = true;
+            ReconstructionSuspended = true;
+            DynamicKalmanGeneration++;
+            DynamicKalmanResetPending = true;
+        }
+
         PublishSnapshot(reason.Trim());
+    }
+
+    public bool MarkReferenceCandidateContinuityBreak()
+    {
+        lock (ReferenceCandidateGate)
+        {
+            var changed = !ReferenceCandidateContinuityBreakPending ||
+                Volatile.Read(ref ReferenceCandidateContinuousCount) != 0 ||
+                Volatile.Read(ref ReplacementReferenceCandidateCount) != 0 ||
+                AutomaticReferenceWindow is not null ||
+                SelectedReferenceWindow is not null;
+            ReferenceCandidateContinuityBreakPending = true;
+            Volatile.Write(ref ReferenceCandidateContinuousCount, 0);
+            Volatile.Write(ref ReplacementReferenceCandidateCount, 0);
+            AutomaticReferenceWindow = null;
+            SelectedReferenceWindow = null;
+            return changed;
+        }
     }
 
     public void BeginReplacementPreparation(DateTimeOffset requestedAt) =>

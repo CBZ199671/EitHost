@@ -37,9 +37,44 @@ internal sealed class RealtimeRoiController
         PublishUnavailable(setLabel, "ROI：快速预览参考仅供观察；定量曲线等待正式参考稳定。");
     }
 
+    internal void PublishProvisionalUnavailableIfCurrent(
+        string setLabel,
+        RealtimeRunState state,
+        int dynamicGeneration,
+        int referenceEpoch)
+    {
+        const string summary = "ROI：快速预览参考仅供观察；定量曲线等待正式参考稳定。";
+        var snapshot = CreateUnavailableSnapshot(summary);
+        var displayed = callbacks.IsDisplayedSet(setLabel);
+        if (!state.TryCommitReconstructionState(
+                dynamicGeneration,
+                referenceEpoch,
+                () =>
+                {
+                    previewState.PublishRoi(setLabel, displayed, snapshot);
+                    callbacks.PublishReadiness(
+                        setLabel,
+                        $"ROI 就绪：否 · {summary.Replace("ROI：", string.Empty, StringComparison.Ordinal)}");
+                }))
+        {
+            return;
+        }
+
+        callbacks.RequestPreviewFlush();
+    }
+
     internal void PublishUnavailable(string setLabel, string summary)
     {
-        var snapshot = new RealtimeRoiPreviewSnapshot(
+        var snapshot = CreateUnavailableSnapshot(summary);
+        previewState.PublishRoi(setLabel, callbacks.IsDisplayedSet(setLabel), snapshot);
+        callbacks.PublishReadiness(
+            setLabel,
+            $"ROI 就绪：否 · {summary.Replace("ROI：", string.Empty, StringComparison.Ordinal)}");
+        callbacks.RequestPreviewFlush();
+    }
+
+    private static RealtimeRoiPreviewSnapshot CreateUnavailableSnapshot(string summary) =>
+        new(
             null,
             null,
             null,
@@ -49,20 +84,22 @@ internal sealed class RealtimeRoiController
             string.Empty,
             summary,
             FixedRoiTemporalVisualSnapshot.Empty);
-        previewState.PublishRoi(setLabel, callbacks.IsDisplayedSet(setLabel), snapshot);
-        callbacks.PublishReadiness(
-            setLabel,
-            $"ROI 就绪：否 · {summary.Replace("ROI：", string.Empty, StringComparison.Ordinal)}");
-        callbacks.RequestPreviewFlush();
-    }
 
     internal void PublishMeasurement(
         string setLabel,
         RealtimeReconstructionResult result,
         double qualityWeight,
         RealtimeRunState state,
+        int referenceEpoch,
+        int dynamicGeneration,
+        string referenceLockKind,
         string valueSource = RoiValueSource.InverseReconstruction)
     {
+        if (!state.IsReconstructionContextCurrent(dynamicGeneration, referenceEpoch))
+        {
+            return;
+        }
+
         if (!string.Equals(valueSource, RoiValueSource.TrustedNeutral, StringComparison.Ordinal))
         {
             FlushPendingNeutralMeasurements(setLabel, state);
@@ -74,8 +111,9 @@ internal sealed class RealtimeRoiController
             qualityWeight,
             state,
             valueSource,
-            state.ReferenceEpoch > 0 ? state.ReferenceEpoch : null,
-            state.ActiveReferenceLockKind);
+            referenceEpoch > 0 ? referenceEpoch : null,
+            referenceLockKind,
+            dynamicGeneration);
     }
 
     private void PublishMeasurementCore(
@@ -85,9 +123,18 @@ internal sealed class RealtimeRoiController
         RealtimeRunState state,
         string valueSource,
         int? referenceEpoch,
-        string referenceLockKind)
+        string referenceLockKind,
+        int? expectedDynamicGeneration = null)
     {
-        callbacks.PublishReadiness(setLabel, "ROI 就绪：是 · 当前参考 epoch 正常发布");
+        bool IsCurrentResult() => expectedDynamicGeneration is null ||
+            referenceEpoch is { } epoch &&
+            state.IsReconstructionContextCurrent(expectedDynamicGeneration.Value, epoch);
+
+        if (!IsCurrentResult())
+        {
+            return;
+        }
+
         var roi = RoiVisualizationEngine.CaptureSelection(workspace);
         FixedRoiTemporalSample? fixedSample = null;
         RoiCurvePoint? point;
@@ -146,78 +193,115 @@ internal sealed class RealtimeRoiController
         {
             return;
         }
+        if (!IsCurrentResult())
+        {
+            return;
+        }
 
         if (point is null && fixedSample is null)
         {
-            previewState.PublishRoi(
-                setLabel,
-                callbacks.IsDisplayedSet(setLabel),
-                new RealtimeRoiPreviewSnapshot(
-                    null,
-                    null,
-                    null,
-                    [],
-                    string.Empty,
-                    string.Empty,
-                    string.Empty,
-                    "ROI：当前选区没有命中重构单元。",
-                    FixedRoiTemporalVisualSnapshot.Empty));
+            var displayed = callbacks.IsDisplayedSet(setLabel);
+            if (!TryCommitResultState(
+                    state,
+                    expectedDynamicGeneration,
+                    referenceEpoch,
+                    () =>
+                    {
+                        previewState.PublishRoi(
+                            setLabel,
+                            displayed,
+                            new RealtimeRoiPreviewSnapshot(
+                                null,
+                                null,
+                                null,
+                                [],
+                                string.Empty,
+                                string.Empty,
+                                string.Empty,
+                                "ROI：当前选区没有命中重构单元。",
+                                FixedRoiTemporalVisualSnapshot.Empty));
+                        callbacks.PublishReadiness(setLabel, "ROI 就绪：是 · 当前参考 epoch 正常发布");
+                    }))
+            {
+                return;
+            }
+
             callbacks.RequestPreviewFlush();
             return;
         }
 
         var shouldUpdatePreview = callbacks.ShouldUpdatePreview(state);
-        RoiCurvePoint[] seriesSnapshot;
-        FixedRoiTemporalSample[] fixedSamplesSnapshot;
-        FixedRoiTemporalVisualSnapshot previousFixedTemporal;
-        lock (previewState.Gate)
+        RoiCurvePoint[] seriesSnapshot = [];
+        FixedRoiTemporalSample[] fixedSamplesSnapshot = [];
+        FixedRoiTemporalVisualSnapshot previousFixedTemporal = FixedRoiTemporalVisualSnapshot.Empty;
+        var revisionCurrent = true;
+        if (!TryCommitResultState(
+                state,
+                expectedDynamicGeneration,
+                referenceEpoch,
+                () =>
+                {
+                    lock (previewState.Gate)
+                    {
+                        if (roi.Revision != workspace.RoiDefinitionRevision)
+                        {
+                            revisionCurrent = false;
+                            return;
+                        }
+
+                        var series = previewState.RoiSeriesBySet.TryGetValue(setLabel, out var existing)
+                            ? existing
+                            : previewState.RoiSeriesBySet[setLabel] = [];
+                        var lastSeriesFrameIndex = series.Count == 0 ? 0 : series[^1].FrameIndex;
+                        var lastFixedFrameIndex = previewState.FixedRoiSamplesBySet.TryGetValue(setLabel, out var priorSamples) &&
+                            priorSamples.Count > 0
+                                ? priorSamples[^1].FrameIndex
+                                : 0;
+                        var nextFrameIndex = Math.Max(lastSeriesFrameIndex, lastFixedFrameIndex) + 1;
+                        if (point is not null)
+                        {
+                            point = point with { FrameIndex = nextFrameIndex };
+                            series.Add(point);
+                            RoiVisualizationEngine.ApplyRealtimeRoiFilteringUnsafe(series);
+                            point = series[^1];
+                        }
+
+                        while (series.Count > SeriesLimit)
+                        {
+                            series.RemoveAt(0);
+                        }
+
+                        if (fixedSample is not null)
+                        {
+                            var samples = previewState.FixedRoiSamplesBySet.TryGetValue(setLabel, out var existingSamples)
+                                ? existingSamples
+                                : previewState.FixedRoiSamplesBySet[setLabel] = [];
+                            fixedSample = fixedSample with { FrameIndex = nextFrameIndex };
+                            samples.Add(fixedSample);
+                            TrimFixedSamplesUnsafe(setLabel, samples);
+                        }
+
+                        seriesSnapshot = shouldUpdatePreview ? [.. series] : [];
+                        fixedSamplesSnapshot = fixedSample is null || !shouldUpdatePreview
+                            ? []
+                            : [.. previewState.FixedRoiSamplesBySet[setLabel]];
+                        previousFixedTemporal = previewState.GetOrCreateUnsafe(setLabel).Roi?.FixedTemporal
+                            ?? FixedRoiTemporalVisualSnapshot.Empty;
+                    }
+                }))
         {
-            if (roi.Revision != workspace.RoiDefinitionRevision)
-            {
-                return;
-            }
-
-            var series = previewState.RoiSeriesBySet.TryGetValue(setLabel, out var existing)
-                ? existing
-                : previewState.RoiSeriesBySet[setLabel] = [];
-            var lastSeriesFrameIndex = series.Count == 0 ? 0 : series[^1].FrameIndex;
-            var lastFixedFrameIndex = previewState.FixedRoiSamplesBySet.TryGetValue(setLabel, out var priorSamples) &&
-                priorSamples.Count > 0
-                    ? priorSamples[^1].FrameIndex
-                    : 0;
-            var nextFrameIndex = Math.Max(lastSeriesFrameIndex, lastFixedFrameIndex) + 1;
-            if (point is not null)
-            {
-                point = point with { FrameIndex = nextFrameIndex };
-                series.Add(point);
-                RoiVisualizationEngine.ApplyRealtimeRoiFilteringUnsafe(series);
-                point = series[^1];
-            }
-
-            while (series.Count > SeriesLimit)
-            {
-                series.RemoveAt(0);
-            }
-
-            if (fixedSample is not null)
-            {
-                var samples = previewState.FixedRoiSamplesBySet.TryGetValue(setLabel, out var existingSamples)
-                    ? existingSamples
-                    : previewState.FixedRoiSamplesBySet[setLabel] = [];
-                fixedSample = fixedSample with { FrameIndex = nextFrameIndex };
-                samples.Add(fixedSample);
-                TrimFixedSamplesUnsafe(setLabel, samples);
-            }
-
-            seriesSnapshot = shouldUpdatePreview ? [.. series] : [];
-            fixedSamplesSnapshot = fixedSample is null || !shouldUpdatePreview
-                ? []
-                : [.. previewState.FixedRoiSamplesBySet[setLabel]];
-            previousFixedTemporal = previewState.GetOrCreateUnsafe(setLabel).Roi?.FixedTemporal
-                ?? FixedRoiTemporalVisualSnapshot.Empty;
+            return;
+        }
+        if (!revisionCurrent)
+        {
+            return;
         }
 
         if (!shouldUpdatePreview)
+        {
+            return;
+        }
+        if (!IsCurrentResult())
         {
             return;
         }
@@ -237,11 +321,29 @@ internal sealed class RealtimeRoiController
                 string.Empty,
                 $"ROI 实时：{fixedSamplesSnapshot.Length} 帧 · block {result.BlockNumber} · {selectedText}",
                 previousFixedTemporal);
-            previewState.PublishRoi(setLabel, callbacks.IsDisplayedSet(setLabel), fixedSnapshot);
+            var displayed = callbacks.IsDisplayedSet(setLabel);
+            if (!TryCommitResultState(
+                    state,
+                    expectedDynamicGeneration,
+                    referenceEpoch,
+                    () =>
+                    {
+                        previewState.PublishRoi(setLabel, displayed, fixedSnapshot);
+                        callbacks.PublishReadiness(setLabel, "ROI 就绪：是 · 当前参考 epoch 正常发布");
+                    }))
+            {
+                return;
+            }
 
             if (callbacks.ShouldUpdateTemporal(state))
             {
-                QueueFixedTemporalVisualRebuild(setLabel, fixedSamplesSnapshot, roi, state);
+                QueueFixedTemporalVisualRebuild(
+                    setLabel,
+                    fixedSamplesSnapshot,
+                    roi,
+                    state,
+                    expectedDynamicGeneration,
+                    referenceEpoch);
             }
 
             callbacks.RaiseSaveCanExecute();
@@ -264,8 +366,25 @@ internal sealed class RealtimeRoiController
         {
             return;
         }
+        if (!IsCurrentResult())
+        {
+            return;
+        }
 
-        previewState.PublishRoi(setLabel, callbacks.IsDisplayedSet(setLabel), snapshot);
+        var chartDisplayed = callbacks.IsDisplayedSet(setLabel);
+        if (!TryCommitResultState(
+                state,
+                expectedDynamicGeneration,
+                referenceEpoch,
+                () =>
+                {
+                    previewState.PublishRoi(setLabel, chartDisplayed, snapshot);
+                    callbacks.PublishReadiness(setLabel, "ROI 就绪：是 · 当前参考 epoch 正常发布");
+                }))
+        {
+            return;
+        }
+
         callbacks.RaiseSaveCanExecute();
         callbacks.RequestPreviewFlush();
     }
@@ -367,7 +486,9 @@ internal sealed class RealtimeRoiController
         string setLabel,
         IReadOnlyList<FixedRoiTemporalSample> samples,
         RoiSelectionSnapshot roi,
-        RealtimeRunState state)
+        RealtimeRunState state,
+        int? expectedDynamicGeneration,
+        int? referenceEpoch)
     {
         if (Interlocked.CompareExchange(ref state.FixedRoiTemporalRebuildPending, 1, 0) != 0)
         {
@@ -397,23 +518,39 @@ internal sealed class RealtimeRoiController
                     return;
                 }
 
-                lock (previewState.Gate)
-                {
-                    UpdatePinnedFramesUnsafe(setLabel, samples, analysis);
-                    var cache = previewState.GetOrCreateUnsafe(setLabel);
-                    if (cache.Roi is not { } existing)
-                    {
-                        return;
-                    }
+                var published = false;
+                if (!TryCommitResultState(
+                        state,
+                        expectedDynamicGeneration,
+                        referenceEpoch,
+                        () =>
+                        {
+                            lock (previewState.Gate)
+                            {
+                                UpdatePinnedFramesUnsafe(setLabel, samples, analysis);
+                                var cache = previewState.GetOrCreateUnsafe(setLabel);
+                                if (cache.Roi is not { } existing)
+                                {
+                                    return;
+                                }
 
-                    cache.Roi = existing with { FixedTemporal = visual };
-                    if (callbacks.IsDisplayedSet(setLabel))
-                    {
-                        previewState.PendingRoiUnsafe = cache.Roi;
-                    }
+                                cache.Roi = existing with { FixedTemporal = visual };
+                                if (callbacks.IsDisplayedSet(setLabel))
+                                {
+                                    previewState.PendingRoiUnsafe = cache.Roi;
+                                }
+
+                                published = true;
+                            }
+                        }))
+                {
+                    return;
                 }
 
-                callbacks.RequestPreviewFlush();
+                if (published)
+                {
+                    callbacks.RequestPreviewFlush();
+                }
             }
             catch (Exception ex)
             {
@@ -424,6 +561,24 @@ internal sealed class RealtimeRoiController
                 Interlocked.Exchange(ref state.FixedRoiTemporalRebuildPending, 0);
             }
         });
+    }
+
+    private static bool TryCommitResultState(
+        RealtimeRunState state,
+        int? expectedDynamicGeneration,
+        int? referenceEpoch,
+        Action commit)
+    {
+        if (expectedDynamicGeneration is null || referenceEpoch is null)
+        {
+            commit();
+            return true;
+        }
+
+        return state.TryCommitReconstructionState(
+            expectedDynamicGeneration.Value,
+            referenceEpoch.Value,
+            commit);
     }
 
     private void TrimFixedSamplesUnsafe(string setLabel, List<FixedRoiTemporalSample> samples)

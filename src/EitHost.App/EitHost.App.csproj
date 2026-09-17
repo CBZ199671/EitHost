@@ -17,6 +17,10 @@
           CopyToOutputDirectory="PreserveNewest"
           TargetPath="scripts\start-usb2070-driver-install-admin.ps1"
           ExcludeFromSingleFile="true" />
+    <None Include="..\..\scripts\update-eithost-install.ps1"
+          CopyToOutputDirectory="PreserveNewest"
+          TargetPath="scripts\update-eithost-install.ps1"
+          ExcludeFromSingleFile="true" />
     <None Include="eithost.reconstruction.example.json"
           CopyToOutputDirectory="PreserveNewest"
           ExcludeFromSingleFile="true" />
@@ -24,6 +28,7 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
+    <Version>2.0.16</Version>
     <TargetFramework>net10.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

@@ -7,8 +7,49 @@ namespace EitHost.Core.Storage.Hdf5;
 
 public static class Hdf5FileAccess
 {
+    private static readonly TimeSpan[] OpenRetryDelays =
+    [
+        TimeSpan.FromMilliseconds(25),
+        TimeSpan.FromMilliseconds(50),
+        TimeSpan.FromMilliseconds(100),
+        TimeSpan.FromMilliseconds(200),
+        TimeSpan.FromMilliseconds(400),
+        TimeSpan.FromMilliseconds(800),
+        // Once a lease survives the common 1.575 s window, probe often enough
+        // to avoid adding another long blind interval while remaining bounded.
+        TimeSpan.FromMilliseconds(400),
+        TimeSpan.FromMilliseconds(400),
+        TimeSpan.FromMilliseconds(400),
+        TimeSpan.FromMilliseconds(400)
+    ];
+
     public static NativeFile OpenReadWithRetry(string path) =>
-        AtomicFileCommitter.ExecuteWithTransientLeaseRetry(path, () => H5File.OpenRead(path));
+        ExecuteOpenWithTransientLeaseRetry(path, () => H5File.OpenRead(path));
+
+    internal static T ExecuteOpenWithTransientLeaseRetry<T>(
+        string path,
+        Func<T> operation,
+        Action<TimeSpan>? delay = null,
+        Func<Exception, bool>? shouldRetry = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(operation);
+        delay ??= Thread.Sleep;
+        shouldRetry ??= AtomicFileCommitter.IsTransientLeaseFailure;
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return operation();
+            }
+            catch (Exception ex) when (
+                attempt < OpenRetryDelays.Length &&
+                shouldRetry(ex))
+            {
+                delay(OpenRetryDelays[attempt]);
+            }
+        }
+    }
 }
 
 internal static class AtomicFileCommitter

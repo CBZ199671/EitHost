@@ -321,23 +321,61 @@ public static class ReconstructionPipelineManifestCodec
 
     private static void ValidatePayload(ReconstructionPipelineManifestPayload payload)
     {
-        if (payload.ExperimentRunId == Guid.Empty ||
-            string.IsNullOrWhiteSpace(payload.Demodulation.AlgorithmVersion) ||
-            payload.Demodulation.SampleRateHz <= 0 ||
-            payload.Demodulation.ExcitationFrequencyHz <= 0 ||
-            payload.Demodulation.FramesPerBlock <= 0 ||
-            payload.Weighting.TemporalWindowSize <= 0 ||
-            payload.Weighting.TemporalCenterIndex < 0 ||
-            payload.Weighting.TemporalCenterIndex >= payload.Weighting.TemporalWindowSize ||
-            string.IsNullOrWhiteSpace(payload.Weighting.TemporalPolicyVersion) ||
-            string.IsNullOrWhiteSpace(payload.Inverse.Route) ||
-            string.IsNullOrWhiteSpace(payload.Inverse.BackendProfile) ||
-            string.IsNullOrWhiteSpace(payload.Presentation.RendererVersion) ||
-            (payload.DynamicKalman.Enabled &&
-             (string.IsNullOrWhiteSpace(payload.DynamicKalman.Mode) ||
-              payload.DynamicKalman.UpstreamLatencyFrames != 2)))
+        var invalidFields = new List<string>();
+        RejectIf(payload.ExperimentRunId == Guid.Empty, "experiment_run_id");
+        if (payload.Demodulation is { } demodulation)
         {
-            throw new ArgumentException("Pipeline manifest is incomplete.", nameof(payload));
+            RejectIf(string.IsNullOrWhiteSpace(demodulation.AlgorithmVersion), "demodulation.algorithm_version");
+            RejectIf(demodulation.SampleRateHz <= 0, "demodulation.sample_rate_hz");
+            RejectIf(demodulation.ExcitationFrequencyHz <= 0, "demodulation.excitation_frequency_hz");
+            RejectIf(demodulation.FramesPerBlock <= 0, "demodulation.frames_per_block");
+        }
+        else
+        {
+            invalidFields.Add("demodulation");
+        }
+
+        if (payload.Weighting is { } weighting)
+        {
+            RejectIf(weighting.TemporalWindowSize <= 0, "weighting.temporal_window_size");
+            RejectIf(weighting.TemporalCenterIndex < 0 || weighting.TemporalCenterIndex >= weighting.TemporalWindowSize,
+                "weighting.temporal_center_index");
+            RejectIf(string.IsNullOrWhiteSpace(weighting.TemporalPolicyVersion), "weighting.temporal_policy_version");
+        }
+        else
+        {
+            invalidFields.Add("weighting");
+        }
+
+        RejectIf(string.IsNullOrWhiteSpace(payload.Inverse?.Route), "inverse.route");
+        RejectIf(string.IsNullOrWhiteSpace(payload.Inverse?.BackendProfile), "inverse.backend_profile");
+        RejectIf(string.IsNullOrWhiteSpace(payload.Presentation?.RendererVersion), "presentation.renderer_version");
+        if (payload.DynamicKalman is { } dynamicKalman)
+        {
+            if (dynamicKalman.Enabled)
+            {
+                RejectIf(string.IsNullOrWhiteSpace(dynamicKalman.Mode), "dynamic_kalman.mode");
+                RejectIf(dynamicKalman.UpstreamLatencyFrames != 2, "dynamic_kalman.upstream_latency_frames");
+            }
+        }
+        else
+        {
+            invalidFields.Add("dynamic_kalman");
+        }
+
+        if (invalidFields.Count > 0)
+        {
+            throw new ArgumentException(
+                $"算法清单缺少或包含无效字段：{string.Join(", ", invalidFields)}。请检查本次测量配置。",
+                nameof(payload));
+        }
+
+        void RejectIf(bool invalid, string field)
+        {
+            if (invalid)
+            {
+                invalidFields.Add(field);
+            }
         }
     }
 }

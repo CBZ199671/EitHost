@@ -1,6 +1,7 @@
 using PureHDF;
 using PureHDF.Filters;
 using PureHDF.VOL.Native;
+using System.Runtime.InteropServices;
 
 namespace EitHost.Core.Storage.Hdf5;
 
@@ -13,7 +14,8 @@ internal static class Hdf5StoragePolicy
         [ShuffleFilter.Id, DeflateFilter.Id];
 
     public static object Numeric(ushort[,] values) =>
-        values.LongLength * sizeof(ushort) >= CompressionThresholdBytes
+        values.LongLength * sizeof(ushort) >= CompressionThresholdBytes &&
+        RawCompressionPolicy.ShouldCompress(MemoryMarshal.CreateReadOnlySpan(ref values[0, 0], values.Length))
             ? CreateChunked(
                 values,
                 MatrixChunks(values.GetLength(0), values.GetLength(1), sizeof(ushort)))
@@ -30,7 +32,7 @@ internal static class Hdf5StoragePolicy
         }
 
         var fileDimensions = new[] { checked((ulong)rows), checked((ulong)columns) };
-        return values.LongLength * sizeof(ushort) >= CompressionThresholdBytes
+        return values.LongLength * sizeof(ushort) >= CompressionThresholdBytes && RawCompressionPolicy.ShouldCompress(values)
             ? CreateChunked(
                 values,
                 MatrixChunks(rows, columns, sizeof(ushort)),

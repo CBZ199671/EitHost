@@ -179,6 +179,13 @@ internal sealed class RealtimeReferenceActionController
 
     internal static string CreateRelockStateText(RealtimeRunState state)
     {
+        if (state.ReferenceInvalidated)
+        {
+            return state.ReplacementReferenceCollecting
+                ? $"重锁：失效参考 e{state.ReferenceEpoch} 已暂停；后台正在采集新参考。"
+                : $"重锁：参考 e{state.ReferenceEpoch} 已失效并暂停；请开始重锁。";
+        }
+
         if (Volatile.Read(ref state.ReplacementSwitchRequested) != 0)
         {
             return $"重锁：已确认；当前 e{state.ReferenceEpoch} 继续运行，下一有效目标边界原子切换。";
@@ -255,12 +262,17 @@ internal sealed class RealtimeReferenceActionController
         }
 
         RefreshWindowOptions(label);
-        workspace.ReferenceRelockStateText =
-            $"重锁：后台重新采集中 0/{ReplacementReferenceFrames}；当前 e{state.ReferenceEpoch} 持续正常成像与 ROI。只使用本次准备重锁后新采集的最近 300 个连续严格全绿帧。";
+        workspace.ReferenceRelockStateText = state.ReferenceInvalidated
+            ? $"重锁：失效参考 e{state.ReferenceEpoch} 保持暂停；后台重新采集中 0/{ReplacementReferenceFrames}。只使用本次准备重锁后新采集的最近 300 个连续严格全绿帧。"
+            : $"重锁：后台重新采集中 0/{ReplacementReferenceFrames}；当前 e{state.ReferenceEpoch} 持续正常成像与 ROI。只使用本次准备重锁后新采集的最近 300 个连续严格全绿帧。";
         callbacks.PublishReferenceSummary(
             label,
-            $"重锁准备中：当前参考 e{state.ReferenceEpoch} 保持激活，成像、接触诊断与 ROI 不停；重新采集满 300 个同工况连续严格全绿帧后，主按钮才可准备新参考，再确认切换或取消。");
-        callbacks.PublishStatus($"{label} 已开始后台重锁准备；旧参考 e{state.ReferenceEpoch} 未清除。");
+            state.ReferenceInvalidated
+                ? $"重锁准备中：失效参考 e{state.ReferenceEpoch} 继续保持暂停；重新采集满 300 个同工况连续严格全绿帧后，可准备并确认切换。"
+                : $"重锁准备中：当前参考 e{state.ReferenceEpoch} 保持激活，成像、接触诊断与 ROI 不停；重新采集满 300 个同工况连续严格全绿帧后，主按钮才可准备新参考，再确认切换或取消。");
+        callbacks.PublishStatus(state.ReferenceInvalidated
+            ? $"{label} 已开始为失效参考后台重锁；确认新参考前重构保持暂停。"
+            : $"{label} 已开始后台重锁准备；旧参考 e{state.ReferenceEpoch} 未清除。");
         QueueLog($"{DateTime.Now:HH:mm:ss} {label} replacement reference collection started activeEpoch={state.ReferenceEpoch}");
         callbacks.RefreshPresentation();
     }
@@ -303,9 +315,12 @@ internal sealed class RealtimeReferenceActionController
             }
         }
 
-        workspace.ReferenceRelockStateText =
-            $"重锁：已确认；当前 e{state.ReferenceEpoch} 继续运行，下一有效目标边界原子切换。";
-        callbacks.PublishStatus($"{label} 已确认新参考；等待下一有效目标边界切换。");
+        workspace.ReferenceRelockStateText = state.ReferenceInvalidated
+            ? $"重锁：已确认；失效参考 e{state.ReferenceEpoch} 保持暂停，下一有效目标边界原子切换。"
+            : $"重锁：已确认；当前 e{state.ReferenceEpoch} 继续运行，下一有效目标边界原子切换。";
+        callbacks.PublishStatus(state.ReferenceInvalidated
+            ? $"{label} 已确认新参考；等待下一有效目标边界切换，期间重构保持暂停。"
+            : $"{label} 已确认新参考；等待下一有效目标边界切换。");
         callbacks.RefreshPresentation();
     }
 
@@ -348,11 +363,17 @@ internal sealed class RealtimeReferenceActionController
             }
         }
 
-        workspace.ReferenceRelockStateText = $"重锁：已取消；当前参考 e{state.ReferenceEpoch} 从未中断。";
+        workspace.ReferenceRelockStateText = state.ReferenceInvalidated
+            ? $"重锁：已取消；参考 e{state.ReferenceEpoch} 仍失效并暂停，请重新开始重锁。"
+            : $"重锁：已取消；当前参考 e{state.ReferenceEpoch} 从未中断。";
         callbacks.PublishReferenceSummary(
             label,
-            $"重锁已取消：继续使用原参考 e{state.ReferenceEpoch}，成像与 ROI 未发生切换或分段。");
-        callbacks.PublishStatus($"{label} 重锁已取消；原参考 e{state.ReferenceEpoch} 保持有效。");
+            state.ReferenceInvalidated
+                ? $"重锁已取消：参考 e{state.ReferenceEpoch} 仍失效，重构保持暂停；请重新开始重锁。"
+                : $"重锁已取消：继续使用原参考 e{state.ReferenceEpoch}，成像与 ROI 未发生切换或分段。");
+        callbacks.PublishStatus(state.ReferenceInvalidated
+            ? $"{label} 重锁已取消；失效参考 e{state.ReferenceEpoch} 继续保持暂停。"
+            : $"{label} 重锁已取消；原参考 e{state.ReferenceEpoch} 保持有效。");
         QueueLog($"{DateTime.Now:HH:mm:ss} {label} replacement reference cancelled activeEpoch={state.ReferenceEpoch}");
         callbacks.RefreshPresentation();
     }
@@ -379,7 +400,10 @@ internal sealed class RealtimeReferenceActionController
         }
 
         var blocked = activeStates
-            .Where(state => state.Config is null || state.ReferenceVoltage208 is null || state.ReplacementReferenceCollecting)
+            .Where(state => state.Config is null ||
+                state.ReferenceVoltage208 is null ||
+                state.ReferenceInvalidated ||
+                state.ReplacementReferenceCollecting)
             .Select(state => state.SetLabel)
             .ToArray();
         if (blocked.Length > 0)
@@ -454,6 +478,7 @@ internal sealed class RealtimeReferenceActionController
         {
             if (prepared.Any(item => !item.State.IsActive ||
                 item.State.ReferenceVoltage208 is null ||
+                item.State.ReferenceInvalidated ||
                 item.State.ReplacementReferenceCollecting))
             {
                 callbacks.PublishStatus("多集合同步准备期间运行状态已变化；未修改任何活动参考。");
@@ -492,7 +517,7 @@ internal sealed class RealtimeReferenceActionController
                     $"输入 {item.Selection.Window.FrameCount} / 保留 {item.Reference.FrameCount} / 剔除 {item.Reference.RejectedFrameCount} 帧 · " +
                     $"窗口 skew {item.Selection.WindowSkewMilliseconds / 1000.0:+0.000;-0.000;0.000}s"));
         workspace.ReferenceRelockStateText =
-            $"多集合同步：{prepared.Count} 个集合均已准备；旧参考继续运行，请统一确认或取消。";
+            $"多集合同步：{prepared.Count} 个集合均已准备；尚未切换，请统一确认或取消。";
         callbacks.PublishStatus($"多集合同步参考已准备：{prepared.Count} 个集合，尚未切换。");
         QueueLog($"{DateTime.Now:HH:mm:ss} synchronized reference prepared action={plan.ActionGroupId} sets={prepared.Count}");
         callbacks.RefreshPresentation();
@@ -504,6 +529,7 @@ internal sealed class RealtimeReferenceActionController
         return activeStates.Length >= 2 &&
             activeStates.All(state => state.Config is not null &&
                 state.ReferenceVoltage208 is not null &&
+                !state.ReferenceInvalidated &&
                 !state.ReplacementReferenceCollecting) &&
             !sessions.States.Any(state => state.ReplacementReferenceActionGroupId is not null);
     }
@@ -518,6 +544,11 @@ internal sealed class RealtimeReferenceActionController
             if (!IsCompleteSynchronizedReferenceGroup(states))
             {
                 callbacks.PublishStatus("多集合同步确认失败：准备组不完整，未切换任何集合。");
+                return;
+            }
+            if (states.Any(state => state.ReferenceInvalidated))
+            {
+                callbacks.PublishStatus("多集合同步确认失败：参考失效；请重新开始重锁。");
                 return;
             }
 
@@ -545,6 +576,7 @@ internal sealed class RealtimeReferenceActionController
         {
             var states = GetPreparedSynchronizedReferenceStates();
             return IsCompleteSynchronizedReferenceGroup(states) &&
+                states.All(state => !state.ReferenceInvalidated) &&
                 states.All(state => Volatile.Read(ref state.ReplacementSwitchRequested) == 0);
         }
     }
@@ -572,10 +604,19 @@ internal sealed class RealtimeReferenceActionController
             }
         }
 
-        workspace.SynchronizedReferenceSummary =
-            $"多集合同步已取消 · action {groupId[..8]} · 所有原参考从未中断。";
-        workspace.ReferenceRelockStateText = "多集合同步：已取消；各集合保留原参考。";
-        callbacks.PublishStatus($"已取消 {states.Length} 个集合的同步重锁。");
+        var invalidated = states
+            .Where(state => state.ReferenceInvalidated)
+            .Select(state => state.SetLabel)
+            .ToArray();
+        workspace.SynchronizedReferenceSummary = invalidated.Length == 0
+            ? $"多集合同步已取消 · action {groupId[..8]} · 各集合保留原参考。"
+            : $"多集合同步已取消 · action {groupId[..8]} · 失效参考保持暂停：{string.Join(", ", invalidated)}。";
+        workspace.ReferenceRelockStateText = invalidated.Length == 0
+            ? "多集合同步：已取消；各集合保留原参考。"
+            : "多集合同步：已取消；失效参考保持暂停；请重新开始重锁。";
+        callbacks.PublishStatus(invalidated.Length == 0
+            ? $"已取消 {states.Length} 个集合的同步重锁。"
+            : $"已取消 {states.Length} 个集合的同步重锁；失效参考保持暂停。");
         callbacks.RefreshPresentation();
     }
 
@@ -743,15 +784,20 @@ internal sealed class RealtimeReferenceActionController
                 }
             }
 
-            workspace.ReferenceRelockStateText =
-                $"重锁：新参考已准备（输入 {selectedWindow.FrameCount}，稳健保留 {preparedReference.FrameCount}，剔除 {preparedReference.RejectedFrameCount} 帧），旧 e{state.ReferenceEpoch} 仍在运行；请确认切换或取消。";
+            workspace.ReferenceRelockStateText = state.ReferenceInvalidated
+                ? $"重锁：新参考已准备（输入 {selectedWindow.FrameCount}，稳健保留 {preparedReference.FrameCount}，剔除 {preparedReference.RejectedFrameCount} 帧），失效 e{state.ReferenceEpoch} 保持暂停；请确认切换或取消。"
+                : $"重锁：新参考已准备（输入 {selectedWindow.FrameCount}，稳健保留 {preparedReference.FrameCount}，剔除 {preparedReference.RejectedFrameCount} 帧），旧 e{state.ReferenceEpoch} 仍在运行；请确认切换或取消。";
             callbacks.PublishReferenceSummary(
                 label,
                 $"新参考待切换：{(useSelectedWindow ? "高级所选本次重锁区间" : "重锁后新采集区间")} " +
                 $"{selectedWindow.StartedAt.ToLocalTime():HH:mm:ss}–{selectedWindow.EndedAt.ToLocalTime():HH:mm:ss}，" +
                 $"输入 {selectedWindow.FrameCount} 帧、稳健保留 {preparedReference.FrameCount} 帧、剔除 {preparedReference.RejectedFrameCount} 帧；" +
-                $"当前 e{state.ReferenceEpoch} 继续正常成像与 ROI。请明确确认或取消。");
-            callbacks.PublishStatus($"{label} 新参考已准备，尚未切换；旧参考 e{state.ReferenceEpoch} 保持有效。");
+                (state.ReferenceInvalidated
+                    ? $"失效 e{state.ReferenceEpoch} 保持暂停。请明确确认或取消。"
+                    : $"当前 e{state.ReferenceEpoch} 继续正常成像与 ROI。请明确确认或取消。"));
+            callbacks.PublishStatus(state.ReferenceInvalidated
+                ? $"{label} 新参考已准备，尚未切换；失效参考 e{state.ReferenceEpoch} 保持暂停。"
+                : $"{label} 新参考已准备，尚未切换；旧参考 e{state.ReferenceEpoch} 保持有效。");
             QueueLog($"{DateTime.Now:HH:mm:ss} {label} replacement reference prepared mode={(useSelectedWindow ? "expert-post-prepare" : "post-prepare-300")} window={selectedWindow.WindowId} input={selectedWindow.FrameCount} retained={preparedReference.FrameCount} rejected={preparedReference.RejectedFrameCount} activeEpoch={state.ReferenceEpoch}");
             callbacks.RefreshPresentation();
             return;

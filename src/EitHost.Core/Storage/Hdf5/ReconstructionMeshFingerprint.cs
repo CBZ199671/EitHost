@@ -114,6 +114,9 @@ public sealed class GlobalReconstructionMeshStore(
     private readonly DerivedArtifactHdf5Writer writer = writer ?? throw new ArgumentNullException(nameof(writer));
     private readonly object validationGate = new();
     private readonly HashSet<string> validatedFingerprints = new(StringComparer.Ordinal);
+    private CanonicalMeshBinding? verifiedBinding;
+    private (long Length, DateTime Written) verifiedMeshStamp;
+    private (long Length, DateTime Written) verifiedBindingStamp;
 
     internal ReconstructionMeshReference Ensure(
         Guid creatorRunId,
@@ -176,6 +179,16 @@ public sealed class GlobalReconstructionMeshStore(
 
         lock (BindingGate)
         {
+            // The ordered content fingerprint above still detects an altered input.
+            // Cache only a verified artifact in this DataRoot, and invalidate if either
+            // on-disk binding or mesh changes (including replacement/deletion).
+            if (verifiedBinding is not null &&
+                FileStamp(path) == verifiedMeshStamp &&
+                FileStamp(layout.GlobalReconstructionMeshBindingPath) == verifiedBindingStamp)
+            {
+                EnsureBindingMatches(verifiedBinding, candidate);
+                return new ReconstructionMeshReference(fingerprint, artifactPath, meshIndexMetadata);
+            }
             var existing = ReadBinding();
             if (existing is not null)
             {
@@ -200,9 +213,18 @@ public sealed class GlobalReconstructionMeshStore(
             {
                 WriteBinding(candidate);
             }
+            verifiedBinding = candidate;
+            verifiedMeshStamp = FileStamp(path);
+            verifiedBindingStamp = FileStamp(layout.GlobalReconstructionMeshBindingPath);
         }
 
         return new ReconstructionMeshReference(fingerprint, artifactPath, meshIndexMetadata);
+    }
+
+    private static (long Length, DateTime Written) FileStamp(string path)
+    {
+        var info = new FileInfo(path);
+        return info.Exists ? (info.Length, info.LastWriteTimeUtc) : (-1, DateTime.MinValue);
     }
 
     public ReconstructionMeshSnapshot Load(string artifactPath, string expectedFingerprint)

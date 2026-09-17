@@ -8,6 +8,7 @@ namespace EitHost.App.ViewModels.Workspaces;
 internal sealed record RealtimeTemporalAnalysisCallbacks(
     Action<string> Diagnostic,
     Action<RealtimeImagingRunConfig, RealtimeRunState, string> InvalidateProvisionalReference,
+    Action<string, RealtimeReferenceUiChange> NotifyReferenceUi,
     Action<string, RealtimeDemodulatedBlock, RealtimeRunState> PublishNeutralRoiMeasurement,
     Action<string, RealtimeRunState, ElectrodeContactDiagnosticResult?, string, string> QueueNeutralImage,
     Action<string, string> PublishReconstructionActivity,
@@ -108,9 +109,12 @@ internal sealed class RealtimeTemporalAnalysisController
         }
 
         ResetWindow(state);
+        if (state.MarkReferenceCandidateContinuityBreak())
+        {
+            callbacks.NotifyReferenceUi(config.SetLabel, RealtimeReferenceUiChange.RefreshWindowsAndAllCommands);
+        }
         state.BoundaryChangeGate?.Reset();
-        state.DynamicKalmanGeneration++;
-        state.DynamicKalmanResetPending = true;
+        state.AdvanceDynamicKalmanGeneration();
         state.ConsecutiveLowQualityBlocks = 0;
         state.TimingConsistency.Reset();
         state.TimingMismatchWarningRaised = false;
@@ -159,7 +163,7 @@ internal sealed class RealtimeTemporalAnalysisController
         if (enteringNoChange)
         {
             state.BoundaryNoChangeActive = true;
-            state.DynamicKalmanGeneration++;
+            state.AdvanceDynamicKalmanGeneration();
             state.ImageRasterCache.ResetColorScale();
         }
 
@@ -167,6 +171,10 @@ internal sealed class RealtimeTemporalAnalysisController
         callbacks.PublishNeutralRoiMeasurement(config.SetLabel, selection.Block, state);
         if (enteringNoChange)
         {
+            callbacks.Diagnostic(
+                $"{config.SetLabel} boundary neutral epoch={state.ReferenceEpoch} block={selection.Block.BlockNumber} " +
+                $"action={decision.Action} score={decision.GlobalScore:G6} threshold={decision.Threshold:G6} " +
+                $"excursions={decision.ExcursionCount}/208 noise_policy={state.BoundaryNoiseModel?.NoiseEstimationPolicy}");
             var stats =
                 $"block {selection.Block.BlockNumber} · 均匀场噪声底 · ΔV score {decision.GlobalScore:F2}/{decision.Threshold:F2} · " +
                 $"3σ通道 {decision.ExcursionCount}/208 · 可信ΔV=0 · 未启动逆问题 · Kalman已复位";

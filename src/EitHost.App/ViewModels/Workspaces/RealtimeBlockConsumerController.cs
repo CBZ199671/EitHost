@@ -82,14 +82,29 @@ internal sealed class RealtimeBlockConsumerController
         this.presentation = presentation ?? throw new ArgumentNullException(nameof(presentation));
     }
 
-    internal async Task ConsumeAsync(
+    internal Task ConsumeAsync(
         RealtimeImagingRunConfig config,
         RealtimeRunState state,
         RealtimeDemodulationPipeline pipeline,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        ConsumeCoreAsync(config, state, pipeline.ReadBlocksAsync(cancellationToken), cancellationToken, pipeline);
+
+    internal Task ConsumeAsync(
+        RealtimeImagingRunConfig config,
+        RealtimeRunState state,
+        IAsyncEnumerable<RealtimeDemodulatedBlock> blocks,
+        CancellationToken cancellationToken) => ConsumeCoreAsync(config, state, blocks, cancellationToken, null);
+
+    private async Task ConsumeCoreAsync(
+        RealtimeImagingRunConfig config,
+        RealtimeRunState state,
+        IAsyncEnumerable<RealtimeDemodulatedBlock> blocks,
+        CancellationToken cancellationToken,
+        RealtimeDemodulationPipeline? pipeline)
     {
-        await foreach (var block in pipeline.ReadBlocksAsync(cancellationToken).ConfigureAwait(false))
+        await foreach (var block in blocks.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             analysis.ApplyPendingDiscontinuities(config, state);
             state.BlocksProcessed++;
             await derivedPersistence.PersistDemodulatedBlockAsync(config, state, block).ConfigureAwait(false);
@@ -149,7 +164,10 @@ internal sealed class RealtimeBlockConsumerController
             }
             else
             {
-                state.ReferenceCandidateContinuityBreakPending = true;
+                if (state.MarkReferenceCandidateContinuityBreak())
+                {
+                    presentation.ReferenceCommandsChanged();
+                }
             }
 
             EcdCwrWaveformTemplateDisplayPackage? templateDisplayPackage = null;
@@ -256,13 +274,16 @@ internal sealed class RealtimeBlockConsumerController
 
             if (ShouldUpdateRealtimeDemodPreview(state))
             {
-                state.PipelineDroppedBlocks = pipeline.DroppedBlockCount;
-                state.PipelineDroppedSampleRows = pipeline.DroppedSampleRows;
-                state.PipelineSampleGaps = pipeline.DiscontinuityCount;
-                state.PipelineUsbOverflows = pipeline.OverflowCount;
-                state.PipelineQueuedSamples = pipeline.QueuedSampleChunkCount;
-                state.PipelineQueueHighWater = pipeline.SampleQueueHighWaterMark;
-                state.PipelineCadenceRefreshRejected = pipeline.CadenceRefreshRejectedCount;
+                if (pipeline is not null)
+                {
+                    state.PipelineDroppedBlocks = pipeline.DroppedBlockCount;
+                    state.PipelineDroppedSampleRows = pipeline.DroppedSampleRows;
+                    state.PipelineSampleGaps = pipeline.DiscontinuityCount;
+                    state.PipelineUsbOverflows = pipeline.OverflowCount;
+                    state.PipelineQueuedSamples = pipeline.QueuedSampleChunkCount;
+                    state.PipelineQueueHighWater = pipeline.SampleQueueHighWaterMark;
+                    state.PipelineCadenceRefreshRejected = pipeline.CadenceRefreshRejectedCount;
+                }
                 UpdateRealtimeDemodulationStability(state, block);
                 presentation.PublishSignalPreview(
                     config.SetLabel,
@@ -301,7 +322,6 @@ internal sealed class RealtimeBlockConsumerController
 
             if (!block.IsHighQuality)
             {
-                state.ReferenceCandidateContinuityBreakPending = true;
                 analysis.ResetTemporalWindow(state);
                 if (ShouldUpdateRealtimeStatus(state))
                 {
@@ -330,19 +350,6 @@ internal sealed class RealtimeBlockConsumerController
                     degradedSelection,
                     contactResult,
                     cancellationToken);
-                continue;
-            }
-
-            if (state.ReconstructionSuspended)
-            {
-                analysis.ResetTemporalWindow(state);
-                state.SkippedReconstructionBlocks++;
-                if (ShouldUpdateRealtimeStatus(state))
-                {
-                    var skippedBlock = block.BlockNumber;
-                    presentation.PublishReconstructionActivity(config.SetLabel, $"重构状态：已暂停 · 采集/解调继续 · 跳过 block {skippedBlock}");
-                }
-
                 continue;
             }
 
@@ -443,6 +450,22 @@ internal sealed class RealtimeBlockConsumerController
                 }
             }
 
+            // A backend circuit breaker pauses only inverse reconstruction. Clean
+            // acquisition data must still advance reference stationarity and honor
+            // a queued manual/formal reference lock so the operator can recover.
+            if (state.ReconstructionSuspended)
+            {
+                analysis.ResetTemporalWindow(state);
+                state.SkippedReconstructionBlocks++;
+                if (ShouldUpdateRealtimeStatus(state))
+                {
+                    var skippedBlock = block.BlockNumber;
+                    presentation.PublishReconstructionActivity(config.SetLabel, $"重构状态：已暂停 · 采集/解调及参考稳定性继续 · 跳过 block {skippedBlock}");
+                }
+
+                continue;
+            }
+
             var reconstructionTarget = NormalizeRealtimeTargetIfEnabled(state, target);
             var temporalSelection = analysis.CreateTemporalSelection(
                 config,
@@ -508,16 +531,18 @@ internal sealed class RealtimeBlockConsumerController
 
             var boundaryDisposition = boundaryChangeDecision is null
                 ? null
-                : EcdCwrBoundaryChangeReconstructionDisposition.FromDecision(boundaryChangeDecision);
+                : EcdCwrBoundaryChangeReconstructionDisposition.FromDecision(boundaryChangeDecision,
+                    requireCurrentNeutralLayer: config.TimeDivisionGroup is not null);
             if (boundaryDisposition is { RenderNeutralTrustedImage: true } &&
                 boundaryChangeDecision is { } noChangeDecision)
             {
                 analysis.HandleNoChange(config, state, temporalSelection, noChangeDecision);
+                temporalSelection = temporalSelection with
+                {
+                    Target = boundaryDisposition.CreateTrustedTarget(state.ReferenceVoltage208!, temporalSelection.Target)
+                };
                 if (!boundaryDisposition.ScheduleInverseReconstruction)
                 {
-                    _ = boundaryDisposition.CreateTrustedTarget(
-                        state.ReferenceVoltage208!,
-                        temporalSelection.Target);
                     state.SkippedReconstructionBlocks++;
                     continue;
                 }
@@ -525,8 +550,7 @@ internal sealed class RealtimeBlockConsumerController
             else if (state.BoundaryNoChangeActive)
             {
                 state.BoundaryNoChangeActive = false;
-                state.DynamicKalmanGeneration++;
-                state.DynamicKalmanResetPending = true;
+                state.AdvanceDynamicKalmanGeneration();
                 state.ImageRasterCache.ResetColorScale();
             }
             if (state.ReconstructionTask is { IsCompleted: false })
@@ -805,9 +829,9 @@ internal sealed class RealtimeBlockConsumerController
             block.AcceptedFrameCount,
             framesPerBlock,
             block.QualityWeight,
-            useDiagnosticAverage ? diagnosticAverage!.FlattenAmplitudesRowMajor() : block.MeanAmplitude208.ToArray(),
-            useDiagnosticAverage ? diagnosticAverage!.FlattenRealRowMajor() : block.MeanReal208.ToArray(),
-            useDiagnosticAverage ? diagnosticAverage!.FlattenImaginaryRowMajor() : block.MeanImaginary208.ToArray(),
+            useDiagnosticAverage ? diagnosticAverage!.FlattenAmplitudesRowMajor() : block.MeanAmplitude208,
+            useDiagnosticAverage ? diagnosticAverage!.FlattenRealRowMajor() : block.MeanReal208,
+            useDiagnosticAverage ? diagnosticAverage!.FlattenImaginaryRowMajor() : block.MeanImaginary208,
             state.ReferenceVoltage208?.ToArray(),
             differenceOrientation,
             DiagnosticMode: useDiagnosticAverage,

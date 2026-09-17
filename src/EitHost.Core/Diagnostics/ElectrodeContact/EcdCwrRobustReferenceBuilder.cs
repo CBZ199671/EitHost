@@ -11,7 +11,8 @@ public sealed record EcdCwrRobustReferenceOptions(
     double HuberTuningConstant = 1.5,
     bool NormalizeCommonScale = false,
     double PhysicalAdcLsbVolts = 10.0 / ushort.MaxValue,
-    bool DetrendNoiseModel = false);
+    bool DetrendNoiseModel = false,
+    bool UseShortTermNoiseModel = false);
 
 public sealed record EcdCwrRobustReference(
     double[] Voltage208,
@@ -148,7 +149,8 @@ public sealed class EcdCwrRobustReferenceBuilder
                 stableVoltage,
                 new EcdCwrBoundaryNoiseModelOptions(
                     PhysicalAdcLsbVolts: options.PhysicalAdcLsbVolts,
-                    DetrendLinearTrend: options.DetrendNoiseModel),
+                    DetrendLinearTrend: options.DetrendNoiseModel,
+                    UseShortTermResiduals: options.UseShortTermNoiseModel),
                 centerVoltage208: voltage208),
             options.NormalizeCommonScale,
             Median(normalizationScales),

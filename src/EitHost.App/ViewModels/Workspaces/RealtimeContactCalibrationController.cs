@@ -137,8 +137,6 @@ internal sealed class RealtimeContactCalibrationController
                 Volatile.Write(ref state.ReferenceCandidateStrictGreenCount, 0);
             }
             state.LatestContactResult = null;
-            state.ReferenceInvalidated = false;
-            callbacks.PublishReferenceInvalidated(config.SetLabel, false);
             callbacks.CalibrationStateChanged();
             callbacks.Diagnostic(
                 $"{config.SetLabel} contact qc_ref locked block={block.BlockNumber} robust_frames={robustReference.FrameCount} detect={(config.EnableOutlierDetection ? "on" : "off")} comp={(config.EnableOutlierCompensation ? "on" : "off")} reference_tolerance={RealtimeReferenceTolerancePolicy.ProfileVersion}");

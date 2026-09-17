@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 
 namespace EitHost.Core.Reconstruction;
@@ -26,7 +27,9 @@ public static class WslPyEidorsReconstructionOptionsLoader
         Func<string, string?>? getEnvironmentVariable = null)
     {
         getEnvironmentVariable ??= Environment.GetEnvironmentVariable;
-        var options = new WslPyEidorsReconstructionOptions(ExchangeDirectory: exchangeDirectory);
+        var options = new WslPyEidorsReconstructionOptions(
+            DistroName: string.Empty,
+            ExchangeDirectory: exchangeDirectory);
         foreach (var configPath in EnumerateConfigPaths(baseDirectory, localAppDataDirectory, getEnvironmentVariable))
         {
             if (!File.Exists(configPath))
@@ -58,9 +61,25 @@ public static class WslPyEidorsReconstructionOptionsLoader
         string? localAppDataDirectory = null,
         bool persistExchangeDirectory = false)
     {
+        return SaveUserConfig(
+            options,
+            localAppDataDirectory,
+            persistExchangeDirectory,
+            static (temporaryPath, destinationPath, overwrite) =>
+                File.Move(temporaryPath, destinationPath, overwrite));
+    }
+
+    internal static string SaveUserConfig(
+        WslPyEidorsReconstructionOptions options,
+        string? localAppDataDirectory,
+        bool persistExchangeDirectory,
+        Action<string, string, bool> commitFile)
+    {
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(commitFile);
         var path = GetUserConfigPath(localAppDataDirectory);
-        Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
+        var directory = Path.GetDirectoryName(path) ?? ".";
+        Directory.CreateDirectory(directory);
         var config = new WslPyEidorsReconstructionOptionsConfig
         {
             DistroName = options.DistroName,
@@ -74,8 +93,38 @@ public static class WslPyEidorsReconstructionOptionsLoader
             WorkerLaunchCommand = options.WorkerLaunchCommand,
             DoctorCommand = options.DoctorCommand
         };
-        File.WriteAllText(path, JsonSerializer.Serialize(config, SaveJsonOptions));
-        return path;
+        var temporaryPath = Path.Combine(
+            directory,
+            $"{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            var content = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(config, SaveJsonOptions));
+            using (var stream = new FileStream(
+                temporaryPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 4096,
+                FileOptions.WriteThrough))
+            {
+                stream.Write(content);
+                stream.Flush(flushToDisk: true);
+            }
+
+            commitFile(temporaryPath, path, true);
+            return path;
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(temporaryPath);
+            }
+            catch
+            {
+                // A failed best-effort cleanup must not hide the original save error.
+            }
+        }
     }
 
     private static IEnumerable<string> EnumerateConfigPaths(

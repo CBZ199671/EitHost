@@ -29,7 +29,7 @@ public sealed class RealtimePersistenceQueue<T> : IAsyncDisposable
         channel = Channel.CreateBounded<T>(new BoundedChannelOptions(capacity)
         {
             SingleReader = true,
-            SingleWriter = true,
+            SingleWriter = false,
             FullMode = BoundedChannelFullMode.Wait,
             AllowSynchronousContinuations = false
         });
@@ -56,14 +56,14 @@ public sealed class RealtimePersistenceQueue<T> : IAsyncDisposable
         return false;
     }
 
-    public async ValueTask EnqueueAsync(T item)
+    public async ValueTask EnqueueAsync(T item, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(item);
         ThrowIfUnavailable();
         IncrementPending();
         try
         {
-            await channel.Writer.WriteAsync(item).ConfigureAwait(false);
+            await channel.Writer.WriteAsync(item, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -75,14 +75,15 @@ public sealed class RealtimePersistenceQueue<T> : IAsyncDisposable
 
     public void ThrowIfFaulted() => failure?.Throw();
 
-    public async Task CompleteAsync()
+    public async Task CompleteAsync(CancellationToken cancellationToken = default)
     {
         if (Interlocked.Exchange(ref completionStarted, 1) == 0)
         {
             channel.Writer.TryComplete();
         }
 
-        await worker.ConfigureAwait(false);
+        // Cancellation bounds the caller's wait; accepted records continue draining.
+        await worker.WaitAsync(cancellationToken).ConfigureAwait(false);
         failure?.Throw();
     }
 

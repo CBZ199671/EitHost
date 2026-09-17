@@ -6,7 +6,7 @@ public sealed class RealtimeBlockDemodulator
 
     private readonly RealtimeDemodulationSettings settings;
     private readonly OfflineDemodulator offlineDemodulator;
-    private readonly List<ushort[]> bufferedRows = [];
+    private readonly AdcSampleRingBuffer bufferedRows = new();
     private readonly ushort[,] cadenceHistoryRows;
     private long firstBufferedSampleIndex;
     private int nextBlockNumber = 1;
@@ -68,16 +68,7 @@ public sealed class RealtimeBlockDemodulator
             throw new ArgumentException("Realtime demodulation expects raw data shaped [sample, 16].", nameof(rawAdcCounts));
         }
 
-        for (var row = 0; row < rawAdcCounts.GetLength(0); row++)
-        {
-            var copy = new ushort[ChannelCount];
-            for (var channel = 0; channel < ChannelCount; channel++)
-            {
-                copy[channel] = rawAdcCounts[row, channel];
-            }
-
-            bufferedRows.Add(copy);
-        }
+        bufferedRows.Append(rawAdcCounts);
     }
 
     public IReadOnlyList<RealtimeDemodulatedBlock> ProcessAvailableBlocks()
@@ -156,7 +147,7 @@ public sealed class RealtimeBlockDemodulator
             result.UniformIntegrationInstability);
 
         AppendCadenceHistory(bufferedRows, consumedSamples);
-        bufferedRows.RemoveRange(0, consumedSamples);
+        bufferedRows.Consume(consumedSamples);
         firstBufferedSampleIndex += consumedSamples;
         UpdateCadenceLock(result, shouldRelock, isHighQuality);
         return true;
@@ -266,7 +257,7 @@ public sealed class RealtimeBlockDemodulator
         CadenceRefreshAppliedCount++;
     }
 
-    private void AppendCadenceHistory(IReadOnlyList<ushort[]> source, int rowCount)
+    private void AppendCadenceHistory(AdcSampleRingBuffer source, int rowCount)
     {
         var capacity = cadenceHistoryRows.GetLength(0);
         var count = Math.Min(rowCount, source.Count);
@@ -286,7 +277,7 @@ public sealed class RealtimeBlockDemodulator
 
             for (var channel = 0; channel < ChannelCount; channel++)
             {
-                cadenceHistoryRows[destinationRow, channel] = source[row][channel];
+                cadenceHistoryRows[destinationRow, channel] = source[row, channel];
             }
         }
     }
@@ -317,6 +308,7 @@ public sealed class RealtimeBlockDemodulator
             var result = new OfflineDemodulator().Demodulate(history, settings.ToOfflineSettings());
             var usable = result.PeakLocations.Count >= 2 &&
                 result.Frames.Count > 0 &&
+                result.UniformIntegrationStable &&
                 result.Average.AcceptedFrameCount >= settings.MinimumAcceptedFrames &&
                 result.EstimatedWindowSamples > 1.0;
             return new CadenceRefreshResult(
@@ -329,21 +321,7 @@ public sealed class RealtimeBlockDemodulator
         }
     }
 
-    private ushort[,] MaterializeBufferedRows(int rowCount)
-    {
-        var count = Math.Min(rowCount, bufferedRows.Count);
-        var raw = new ushort[count, ChannelCount];
-        for (var row = 0; row < count; row++)
-        {
-            var source = bufferedRows[row];
-            for (var channel = 0; channel < ChannelCount; channel++)
-            {
-                raw[row, channel] = source[channel];
-            }
-        }
-
-        return raw;
-    }
+    private ushort[,] MaterializeBufferedRows(int rowCount) => bufferedRows.Materialize(rowCount);
 
     private static int EstimateRotationDirection(DemodulatedFrame? frame)
     {

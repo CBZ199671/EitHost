@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using EitHost.Core.Storage.Hdf5;
 
 namespace EitHost.Core.Reconstruction;
 
@@ -50,23 +51,38 @@ public sealed class WslPyEidorsOneShotReconstructionBackend : IRealtimeReconstru
 
             var stopwatch = Stopwatch.StartNew();
             var startInfo = CreateStartInfo(inputPath, outputPath);
-            using var process = Process.Start(startInfo)
+            using var process = Hdf5ChildProcess.Start(startInfo)
                 ?? throw new InvalidOperationException("Failed to start wsl.exe PyEIDORS one-shot backend.");
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-            var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+            Task<string> stdoutTask = Task.FromResult(string.Empty);
+            Task<string> stderrTask = Task.FromResult(string.Empty);
+            string stdout;
+            string stderr;
             try
             {
+                stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+                stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
                 await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+                stdout = await stdoutTask.ConfigureAwait(false);
+                stderr = await stderrTask.ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                KillBestEffort(process);
+                await TerminateAndObserveProcessAsync(
+                    process,
+                    stdoutTask,
+                    stderrTask).ConfigureAwait(false);
+                throw;
+            }
+            catch (Exception ex) when (!IsFatal(ex))
+            {
+                await TerminateAndObserveProcessAsync(
+                    process,
+                    stdoutTask,
+                    stderrTask).ConfigureAwait(false);
                 throw;
             }
 
             stopwatch.Stop();
-            var stdout = await stdoutTask.ConfigureAwait(false);
-            var stderr = await stderrTask.ConfigureAwait(false);
             if (process.ExitCode != 0)
             {
                 var diagnostics =
@@ -356,8 +372,14 @@ public sealed class WslPyEidorsOneShotReconstructionBackend : IRealtimeReconstru
         return $"{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}_{label}_block{request.BlockNumber:000000}_{sequence:000000}";
     }
 
-    private static void KillBestEffort(Process process)
+    internal static async Task<bool> TerminateAndObserveProcessAsync(
+        Process process,
+        Task<string> stdoutTask,
+        Task<string> stderrTask)
     {
+        ArgumentNullException.ThrowIfNull(process);
+        ArgumentNullException.ThrowIfNull(stdoutTask);
+        ArgumentNullException.ThrowIfNull(stderrTask);
         try
         {
             if (!process.HasExited)
@@ -365,11 +387,93 @@ public sealed class WslPyEidorsOneShotReconstructionBackend : IRealtimeReconstru
                 process.Kill(entireProcessTree: true);
             }
         }
-        catch
+        catch (Exception ex) when (!IsFatal(ex))
         {
             // best-effort cancellation
         }
+
+        try
+        {
+            await process.WaitForExitAsync(CancellationToken.None)
+                .WaitAsync(TimeSpan.FromSeconds(2))
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!IsFatal(ex))
+        {
+            try
+            {
+                if (IsProcessAlive(process))
+                {
+                    process.Kill();
+                }
+            }
+            catch (Exception fallbackException) when (!IsFatal(fallbackException))
+            {
+                // The caller's original failure remains the primary outcome.
+            }
+
+            try
+            {
+                await process.WaitForExitAsync(CancellationToken.None)
+                    .WaitAsync(TimeSpan.FromSeconds(2))
+                    .ConfigureAwait(false);
+            }
+            catch (Exception finalException) when (!IsFatal(finalException))
+            {
+                // The return value reports whether the process actually terminated.
+            }
+        }
+
+        var drains = Task.WhenAll(stdoutTask, stderrTask);
+        try
+        {
+            await drains
+                .WaitAsync(TimeSpan.FromSeconds(2))
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!IsFatal(ex))
+        {
+            // Observe canceled/faulted drains without masking the primary cancellation.
+            ObserveLateFault(drains);
+        }
+
+        return !IsProcessAlive(process);
     }
+
+    private static void ObserveLateFault(Task task)
+    {
+        if (task.IsFaulted)
+        {
+            _ = task.Exception;
+            return;
+        }
+
+        if (!task.IsCompleted)
+        {
+            _ = task.ContinueWith(
+                static completed => _ = completed.Exception,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously | TaskContinuationOptions.OnlyOnFaulted,
+                TaskScheduler.Default);
+        }
+    }
+
+    private static bool IsProcessAlive(Process process)
+    {
+        try
+        {
+            return !process.HasExited;
+        }
+        catch (Exception ex) when (!IsFatal(ex))
+        {
+            return false;
+        }
+    }
+
+    private static bool IsFatal(Exception exception) =>
+        exception is OutOfMemoryException
+            or StackOverflowException
+            or AccessViolationException;
 
     private static string TrimForMessage(string value)
     {

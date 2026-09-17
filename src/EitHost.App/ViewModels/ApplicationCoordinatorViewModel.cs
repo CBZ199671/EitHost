@@ -401,7 +401,9 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
             new VisualizationWorkspaceViewModel());
         pseudo3dVisualization = new Pseudo3dVisualizationController(
             presentation => PostToUi(() => ApplyPseudo3dPresentation(presentation)),
-            AddRealtimeDiagnostic);
+            AddRealtimeDiagnostic,
+            backendController,
+            presentation => derivedPersistence.PersistPseudo3dAsync(presentation));
         ExperimentWorkspace.AttachRunLifecycleController(experimentRunLifecycleController);
         HardwareWorkspace.AttachRunParameterEditor(new DeviceRunParameterEditor(
             () => SelectedBoundPairing,
@@ -410,7 +412,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
         var replay = new ReplayVisualizationController(VisualizationWorkspace, dataLayout, canonicalReplaySource,
             () => RealtimeImagePolarity, () => RealtimeImageGain, PostToUi);
         VisualizationWorkspace.AttachReplayController(replay);
-        ExperimentWorkspace.AttachExperimentDeletionPreparation(replay.ReleaseExperimentAsync);
+        ExperimentWorkspace.AttachExperimentDeletionPreparation(ReleaseExperimentReplayAsync);
         VisualizationWorkspace.AttachRealtimePreviewController(new RealtimePreviewController(
             VisualizationWorkspace,
             realtimePreviewState,
@@ -421,7 +423,8 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
                 () => RealtimeImagePolarity,
                 () => RealtimeImageGain,
                 () => PostToUi(() => OnPropertyChanged(nameof(RealtimeContactCalibrationExportStateText))),
-                AddRealtimeDiagnostic)));
+                AddRealtimeDiagnostic,
+                () => ShowRealtimeAuxiliary)));
         VisualizationWorkspace.AttachRealtimeRoiController(new RealtimeRoiController(
             VisualizationWorkspace,
             realtimePreviewState,
@@ -482,32 +485,65 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
             derivedArtifactHdf5Writer,
             backendExchangeArchiver,
             AddRealtimeDiagnostic,
-            ReportRealtimeOperatorDiagnostic));
+            ReportRealtimeOperatorDiagnostic,
+            RequestStorageStop));
         RealtimeWorkspace.AttachReconstructionController(new RealtimeReconstructionController(
             backendController,
             derivedPersistence,
             new RealtimeReconstructionCallbacks(
                 AddRealtimeDiagnostic,
-                realtimePreview.PublishQualityAxes,
-                realtimePreview.PublishReconstructionActivity,
-                pseudo3dVisualization.PublishLayer,
-                (setLabel, result, qualityWeight, state) =>
-                    realtimeRoi.PublishMeasurement(setLabel, result, qualityWeight, state),
-                realtimeRoi.PublishProvisionalUnavailable,
+                (setLabel, dataQuality, referenceMode, reconstructionQuality, roiReadiness, state, dynamicGeneration, referenceEpoch) =>
+                    realtimePreview.PublishQualityAxesIfCurrent(
+                        setLabel,
+                        state,
+                        dynamicGeneration,
+                        referenceEpoch,
+                        dataQuality,
+                        referenceMode,
+                        reconstructionQuality,
+                        roiReadiness),
+                (setLabel, activity, state, dynamicGeneration, referenceEpoch) =>
+                    realtimePreview.PublishReconstructionActivityIfCurrent(
+                        setLabel,
+                        activity,
+                        state,
+                        dynamicGeneration,
+                        referenceEpoch),
+                (setLabel, result, acquiredAt, state, dynamicGeneration, referenceEpoch) =>
+                    pseudo3dVisualization.PublishLayer(
+                        setLabel,
+                        result,
+                        acquiredAt,
+                        state,
+                        dynamicGeneration,
+                        referenceEpoch),
+                (setLabel, result, qualityWeight, state, referenceEpoch, dynamicGeneration, referenceLockKind) =>
+                    realtimeRoi.PublishMeasurement(
+                        setLabel,
+                        result,
+                        qualityWeight,
+                        state,
+                        referenceEpoch,
+                        dynamicGeneration,
+                        referenceLockKind),
+                realtimeRoi.PublishProvisionalUnavailableIfCurrent,
                 realtimePreview.QueueLog,
-                (lines, status) => PostToUi(() =>
+                (state, dynamicGeneration, referenceEpoch, lines, status) => PostToUi(() =>
                 {
-                    foreach (var line in lines)
+                    _ = state.TryCommitReconstructionState(dynamicGeneration, referenceEpoch, () =>
                     {
-                        AddPanelLog(RealtimeImagingLogs, line);
-                    }
+                        foreach (var line in lines)
+                        {
+                            AddPanelLog(RealtimeImagingLogs, line);
+                        }
 
-                    if (status is not null)
-                    {
-                        StatusMessage = status;
-                    }
+                        if (status is not null)
+                        {
+                            StatusMessage = status;
+                        }
+                    });
                 }),
-                RealtimePreviewController.ShouldUpdateBoundaryFitPreview,
+                state => ShowRealtimeAuxiliary && RealtimePreviewController.ShouldUpdateBoundaryFitPreview(state),
                 RealtimePreviewController.ShouldUpdateImagePreview,
                 RealtimePreviewController.ShouldUpdateStatus)));
         RealtimeWorkspace.AttachContactDiagnosticController(new RealtimeContactDiagnosticController(
@@ -578,6 +614,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
             new RealtimeTemporalAnalysisCallbacks(
                 AddRealtimeDiagnostic,
                 realtimeReferenceLifecycle.InvalidateProvisionalReference,
+                NotifyRealtimeReferenceUi,
                 realtimeRoi.PublishNeutral,
                 realtimePreview.QueueNeutralImage,
                 realtimePreview.PublishReconstructionActivity,
@@ -592,6 +629,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
                 realtimePreview.PublishBoundaryUnavailable,
                 realtimePreview.PublishQualityAxes,
                 realtimeReferenceLifecycle.InvalidateProvisionalReference,
+                NotifyRealtimeReferenceUi,
                 RealtimeTemporalAnalysisController.ResetWindow,
                 CreateRealtimeReferenceModeStatus)));
         RealtimeWorkspace.AttachBlockConsumerController(new RealtimeBlockConsumerController(
@@ -645,12 +683,11 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
                 realtimeBlockConsumer.ConsumeAsync,
                  (sampleRateHz, readRows) => rawPersistence.GetRealtimeFlushByteThreshold(sampleRateHz, readRows),
                  (batch, config, state) => rawPersistence.PersistRealtimeAsync(batch, config, state),
-                 (config, state, publishReady) =>
-                     rawPersistence.CompleteRealtimeAsync(config, state, publishReady),
+                 (config, state, publishReady) => rawPersistence.CompleteRealtimeAsync(config, state, publishReady),
                  derivedPersistence.DrainAsync,
                  SendRealtimeDdsCommandAsync,
                 experimentRunLifecycle.CompleteRun,
-                CompleteRealtimeAcquisitionLoopUi)));
+                CompleteRealtimeAcquisitionLoopUi, realtimeBlockConsumer.ConsumeAsync)));
         VisualizationWorkspace.AttachRealtimePreviewPump(new RealtimePreviewPump(
             GetUiDispatcher,
             () => realtimeSessions.ActiveSetCount > 0,
@@ -735,7 +772,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
                 pairing => hardwareRunCommands.CreateUsbDevice(pairing),
                 GetRealtimeReadRows,
                 GetInterferenceFrequencyHzForPairing,
-                () => RealtimeBackendProfile,
+                backendController.GetValidatedStartProfile,
                 () => ContactSubjectProfile,
                 () => ContactFirmwareBuildId,
                 () => ContactKnownAllConnectedCalibrationArmed,
@@ -747,7 +784,8 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
                 message => AddPanelLog(RealtimeImagingLogs, message),
                 message => StatusMessage = message,
                 NotifyRealtimeRunStateChanged,
-                RaiseRealtimeCanExecuteChanged)));
+                RaiseRealtimeCanExecuteChanged,
+                () => new Pseudo3dRunSelection(Pseudo3dEnabled, SelectedPseudo3dLowerPairing, SelectedPseudo3dUpperPairing))));
         HardwareWorkspace.AttachPairingRecoveryController(new RealtimePairingRecoveryController(
             HardwareWorkspace,
             hardwareDiscovery,
@@ -2419,6 +2457,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
 
     private void RaiseRealtimeCanExecuteChanged()
     {
+        RefreshPseudo3dAvailability();
         StartRealtimeImagingCommand.RaiseCanExecuteChanged();
         StartAllRealtimeImagingCommand.RaiseCanExecuteChanged();
         StopRealtimeImagingCommand.RaiseCanExecuteChanged();
@@ -2801,46 +2840,6 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
         realtimePreviewPump.RequestFlush();
     }
 
-    private static string CreateRealtimeReferenceModeStatus(
-        RealtimeImagingRunConfig config,
-        RealtimeRunState state)
-    {
-        var scale = config.ReferenceScalePolicy == EcdCwrReferenceScalePolicy.CommonScaleNormalized
-            ? "公共尺度归一化"
-            : "保留物理尺度";
-        if (state.ReplacementReferenceCollecting)
-        {
-            var scope = state.ReplacementReferenceSynchronizedSetCount > 1
-                ? $"多集合 action {state.ReplacementReferenceActionGroupId?[..8]}"
-                : "单集合";
-            var readiness = state.ReplacementPreparedReference is null
-                ? "后台收集中"
-                : Volatile.Read(ref state.ReplacementSwitchRequested) == 0
-                    ? "新参考待确认"
-                    : "已确认，待有效边界";
-            return $"参考模式：当前 e{state.ReferenceEpoch} 保持活动 · {scope} {readiness} · {scale}";
-        }
-
-        if (state.StartupDegradedReference is not null)
-        {
-            return $"参考模式：故障降级 · {scale}";
-        }
-
-        if (state.ReferenceIsProvisional)
-        {
-            return $"参考模式：快速预览（临时） · {scale}";
-        }
-
-        if (state.ReferenceVoltage208 is null)
-        {
-            return $"参考模式：尚未锁定 · 候选窗口收集中 · {scale}";
-        }
-
-        return string.Equals(state.ActiveReferenceLockKind, "user_selected", StringComparison.Ordinal)
-            ? $"参考模式：用户选定高质量窗口 · 正常置信 · {scale}"
-            : $"参考模式：自动稳定锁定 · {scale}";
-    }
-
     private RealtimeDevicePreviewCache GetRealtimePreviewCacheUnsafe(string setLabel)
     {
         return realtimePreviewState.GetOrCreateUnsafe(setLabel);
@@ -3069,7 +3068,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
 
     private void ApplySelectedExperiment(ExperimentRunListItem? experiment)
     {
-        ExperimentWorkspace.DataTools.ApplySelectedExperiment(experiment);
+        ApplyExperimentSelection(experiment);
         if (experiment is null)
         {
             VisualizationWorkspace.SetSelectedImagingRun(null, notifySelection: false);
@@ -3107,10 +3106,6 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
     {
         var normalized = profileName?.Trim();
         if (string.IsNullOrWhiteSpace(normalized))
-        {
-            return;
-        }
-        if (string.Equals(realtimeBackend.Options.BackendProfile, normalized, StringComparison.Ordinal))
         {
             return;
         }
@@ -3175,7 +3170,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
             Title = "选择 WSL2 中的 PyEIDORS 安装根目录（推荐 ~/apps/PyEIDORS）"
         };
         var initialDirectory = realtimeBackend.InitialDirectory;
-        if (!string.IsNullOrWhiteSpace(initialDirectory) && Directory.Exists(initialDirectory))
+        if (!string.IsNullOrWhiteSpace(initialDirectory))
         {
             dialog.InitialDirectory = initialDirectory;
         }
@@ -3381,7 +3376,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
         realtimeRawPersistenceService.Dispose();
         try
         {
-            if (!derivedPersistence.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(2)))
+            if (!DrainImagingPersistenceAsync().Wait(TimeSpan.FromSeconds(2)))
             {
                 AddRealtimeDiagnostic("derived persistence shutdown timeout");
             }
@@ -3398,7 +3393,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
         realtimePreviewPump.Dispose();
         roiInteractions.Dispose();
         HardwareWorkspace.BoundPairings.CollectionChanged -= OnPseudo3dBoundPairingsChanged;
-        pseudo3dVisualization.Dispose();
+        DisposePseudo3dWorkspaces();
         replayController.Dispose();
         realtimeBackend.Dispose();
     }

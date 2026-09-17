@@ -9,6 +9,20 @@ public sealed class OfflineDemodulator
     public const double MaximumUniformIntegrationInstability = 0.01;
 
     public OfflineDemodulationResult Demodulate(ushort[,] rawAdcCounts, OfflineDemodulationSettings settings)
+        => DemodulateCore(rawAdcCounts, settings, null);
+
+    /// <summary>Searches the first frame of one complete finite scan within its measured start bracket.</summary>
+    public OfflineDemodulationResult DemodulateFiniteScan(
+        ushort[,] rawAdcCounts, OfflineDemodulationSettings settings, int maximumStartSample)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(maximumStartSample);
+        ArgumentNullException.ThrowIfNull(settings);
+        if (!settings.ForceUniformCadence) throw new ArgumentException("Finite scans require uniform dwell timing.", nameof(settings));
+        return DemodulateCore(rawAdcCounts, settings, maximumStartSample);
+    }
+
+    private static OfflineDemodulationResult DemodulateCore(
+        ushort[,] rawAdcCounts, OfflineDemodulationSettings settings, int? maximumStartSample)
     {
         ArgumentNullException.ThrowIfNull(rawAdcCounts);
         ArgumentNullException.ThrowIfNull(settings);
@@ -48,7 +62,7 @@ public sealed class OfflineDemodulator
         if (settings.ForceUniformCadence ||
             (peakLocationsOverride is null && !DetectedPeaksMatchExpectedCadence(peaks, rawAdcCounts.GetLength(0), settings)))
         {
-            var cadence = GenerateUniformFrameCadence(data, waveform, settings);
+            var cadence = GenerateUniformFrameCadence(data, waveform, settings, maximumStartSample);
             peaks = cadence.PeakLocations;
             usedUniformCadence = peaks.Length >= 2;
             uniformOffsetSamples = cadence.OffsetSamples;
@@ -134,7 +148,8 @@ public sealed class OfflineDemodulator
     private static UniformFrameCadence GenerateUniformFrameCadence(
         double[][] data,
         ReferenceWaveform waveform,
-        OfflineDemodulationSettings settings)
+        OfflineDemodulationSettings settings,
+        int? maximumStartSample)
     {
         var sampleCount = data[0].Length;
         var nominalWindowSamples = settings.SampleRateHz / settings.ExcitationFrequencyHz * settings.ChannelCycles;
@@ -152,7 +167,7 @@ public sealed class OfflineDemodulator
                 waveform,
                 settings,
                 lockedWindowSamples,
-                includeFrameCountBonus: true);
+                includeFrameCountBonus: true, maximumStartSample: maximumStartSample);
             var lockedPeaks = BuildUniformPeakLocations(
                 sampleCount,
                 settings,
@@ -166,12 +181,47 @@ public sealed class OfflineDemodulator
                 lockedSelection.IntegrationInstability);
         }
 
-        var selection = FindBestUniformFrameOffset(data, waveform, settings, nominalWindowSamples, includeFrameCountBonus: true);
+        var selection = FindBestUniformFrameOffset(
+            data, waveform, settings, nominalWindowSamples, includeFrameCountBonus: true, forCadenceEstimation: true, maximumStartSample: maximumStartSample);
         var offset = selection.OffsetSamples;
         var windowSamples = EstimateUniformWindowSamples(data, waveform, settings, offset, nominalWindowSamples);
-        selection = FindBestUniformFrameOffset(data, waveform, settings, windowSamples, includeFrameCountBonus: true);
+        selection = FindBestUniformFrameOffset(
+            data, waveform, settings, windowSamples, includeFrameCountBonus: true, forCadenceEstimation: true, maximumStartSample: maximumStartSample);
         offset = selection.OffsetSamples;
         windowSamples = EstimateUniformWindowSamples(data, waveform, settings, offset, nominalWindowSamples);
+        selection = FindBestUniformFrameOffset(data, waveform, settings, windowSamples, includeFrameCountBonus: true, maximumStartSample: maximumStartSample);
+        if (Math.Abs(windowSamples - nominalWindowSamples) > 1e-9)
+        {
+            // The coarse amplitude score may favor a cadence alias even when the
+            // nominal timing yields better integration on the same raw block.
+            // Keep both candidates subject to identical coverage/topology gates;
+            // actual clock drift can still win when supported by the samples.
+            var nominalSelection = FindBestUniformFrameOffset(
+                data, waveform, settings, nominalWindowSamples, includeFrameCountBonus: true, maximumStartSample: maximumStartSample);
+            var candidates = new[]
+            {
+                (WindowSamples: windowSamples, Selection: selection),
+                (WindowSamples: nominalWindowSamples, Selection: nominalSelection)
+            };
+            var best = candidates.Select(candidate => new
+            {
+                candidate.WindowSamples,
+                candidate.Selection,
+                Quality = AnalyzeUniformCadence(data, waveform, settings,
+                    candidate.Selection.OffsetSamples, candidate.WindowSamples,
+                    maxFramesToScore: 8, includeFrameCountBonus: true)
+            })
+                .OrderByDescending(candidate => candidate.Quality.FrameCount)
+                .ThenByDescending(candidate => candidate.Quality.UsableFrameCount)
+                .ThenByDescending(candidate => candidate.Quality.ValidWindowCount)
+                .ThenBy(candidate => candidate.Selection.IntegrationInstability)
+                .ThenBy(candidate => Math.Abs(candidate.WindowSamples - nominalWindowSamples))
+                .First();
+            windowSamples = best.WindowSamples;
+            selection = best.Selection;
+        }
+
+        offset = selection.OffsetSamples;
         var peaks = BuildUniformPeakLocations(sampleCount, settings, offset, windowSamples);
         return new UniformFrameCadence(
             peaks,
@@ -340,11 +390,13 @@ public sealed class OfflineDemodulator
         ReferenceWaveform waveform,
         OfflineDemodulationSettings settings,
         double windowSamples,
-        bool includeFrameCountBonus)
+        bool includeFrameCountBonus,
+        bool forCadenceEstimation = false,
+        int? maximumStartSample = null)
     {
         var sampleCount = data[0].Length;
         var samplesPerFrame = windowSamples * settings.WindowsPerFrame;
-        var maxOffset = Math.Min((int)Math.Round(windowSamples) - 1, (int)Math.Floor(sampleCount - samplesPerFrame));
+        var maxOffset = Math.Min(maximumStartSample ?? (int)Math.Round(windowSamples) - 1, (int)Math.Floor(sampleCount - samplesPerFrame));
         if (maxOffset <= 0)
         {
             var instability = ScoreUniformIntegrationInstability(data, waveform, settings, 0, windowSamples);
@@ -364,7 +416,7 @@ public sealed class OfflineDemodulator
         {
             candidates.Add(new UniformOffsetCandidate(
                 offset,
-                ScoreUniformCadence(
+                AnalyzeUniformCadence(
                     data,
                     waveform,
                     settings,
@@ -378,7 +430,7 @@ public sealed class OfflineDemodulator
         {
             candidates.Add(new UniformOffsetCandidate(
                 maxOffset,
-                ScoreUniformCadence(
+                AnalyzeUniformCadence(
                     data,
                     waveform,
                     settings,
@@ -388,10 +440,21 @@ public sealed class OfflineDemodulator
                     includeFrameCountBonus)));
         }
 
-        var bestTopologyScore = candidates.Max(candidate => candidate.TopologyScore);
+        // Amplitude/contrast bonuses are continuous heuristics, not topology gates.
+        // A small transient bonus must not hide a stable candidate with identical
+        // complete-frame coverage and hard window quality.
+        var bestCoverage = candidates
+            .OrderByDescending(candidate => candidate.Cadence.FrameCount)
+            .ThenByDescending(candidate => candidate.Cadence.UsableFrameCount)
+            .ThenByDescending(candidate => candidate.Cadence.ValidWindowCount)
+            .First().Cadence;
+        var bestTopologyScore = candidates.Max(candidate => candidate.Cadence.Score);
         var equivalentCandidates = candidates
-            .Where(candidate =>
-                candidate.TopologyScore >= bestTopologyScore - UniformTopologyEquivalentScoreTolerance)
+            .Where(candidate => forCadenceEstimation
+                ? candidate.Cadence.Score >= bestTopologyScore - UniformTopologyEquivalentScoreTolerance
+                : candidate.Cadence.FrameCount == bestCoverage.FrameCount &&
+                candidate.Cadence.UsableFrameCount == bestCoverage.UsableFrameCount &&
+                candidate.Cadence.ValidWindowCount == bestCoverage.ValidWindowCount)
             .Select(candidate => candidate with
             {
                 IntegrationInstability = ScoreUniformIntegrationInstability(
@@ -404,9 +467,47 @@ public sealed class OfflineDemodulator
             .ToArray();
         var bestCandidate = equivalentCandidates
             .OrderBy(candidate => candidate.IntegrationInstability)
-            .ThenByDescending(candidate => candidate.TopologyScore)
+            .ThenByDescending(candidate => candidate.Cadence.Score)
             .ThenBy(candidate => candidate.OffsetSamples)
             .First();
+        if (!forCadenceEstimation && stride > 1 &&
+            bestCandidate.IntegrationInstability > MaximumUniformIntegrationInstability)
+        {
+            // One bounded, five-times-denser pass over the phase interval prevents
+            // a coarse grid from skipping a narrow stable region. Searching only
+            // around the coarse winner misses regions across the phase boundary.
+            var fineStride = Math.Max(1, stride / 5);
+            var refinedCandidates = new List<UniformOffsetCandidate> { bestCandidate };
+            var requiredQuality = (bestCoverage.FrameCount, bestCoverage.UsableFrameCount, bestCoverage.ValidWindowCount);
+            for (var offset = 0; offset <= maxOffset; offset += fineStride)
+            {
+                if (offset % stride == 0)
+                {
+                    continue;
+                }
+
+                var quality = AnalyzeUniformCadence(data, waveform, settings, offset, windowSamples,
+                    maxFramesToScore: 8, includeFrameCountBonus);
+                if ((quality.FrameCount, quality.UsableFrameCount, quality.ValidWindowCount)
+                    .CompareTo(requiredQuality) < 0)
+                {
+                    continue;
+                }
+
+                refinedCandidates.Add(new UniformOffsetCandidate(offset, quality,
+                    ScoreUniformIntegrationInstability(data, waveform, settings, offset, windowSamples)));
+            }
+
+            bestCandidate = refinedCandidates
+                .OrderByDescending(candidate => candidate.Cadence.FrameCount)
+                .ThenByDescending(candidate => candidate.Cadence.UsableFrameCount)
+                .ThenByDescending(candidate => candidate.Cadence.ValidWindowCount)
+                .ThenBy(candidate => candidate.IntegrationInstability)
+                .ThenByDescending(candidate => candidate.Cadence.Score)
+                .ThenBy(candidate => candidate.OffsetSamples)
+                .First();
+        }
+
         return new UniformOffsetSelection(
             bestCandidate.OffsetSamples,
             bestCandidate.IntegrationInstability <= MaximumUniformIntegrationInstability,
@@ -560,6 +661,19 @@ public sealed class OfflineDemodulator
         int maxFramesToScore,
         bool includeFrameCountBonus)
     {
+        return AnalyzeUniformCadence(
+            data, waveform, settings, offset, windowSamples, maxFramesToScore, includeFrameCountBonus).Score;
+    }
+
+    private static UniformCadenceScore AnalyzeUniformCadence(
+        double[][] data,
+        ReferenceWaveform waveform,
+        OfflineDemodulationSettings settings,
+        int offset,
+        double windowSamples,
+        int maxFramesToScore,
+        bool includeFrameCountBonus)
+    {
         var sampleCount = data[0].Length;
         var samplesPerFrame = windowSamples * settings.WindowsPerFrame;
         var frameCount = Math.Min(
@@ -567,14 +681,17 @@ public sealed class OfflineDemodulator
             (int)Math.Floor((sampleCount - offset) / samplesPerFrame));
         if (frameCount <= 0)
         {
-            return double.NegativeInfinity;
+            return new UniformCadenceScore(double.NegativeInfinity, 0, 0, 0);
         }
 
         var score = 0.0;
+        var usableFrameCount = 0;
+        var validWindowCount = 0;
         for (var frame = 0; frame < frameCount; frame++)
         {
             var firstWindow = frame * settings.WindowsPerFrame;
             var analyses = new WindowAmplitudeAnalysis[settings.WindowsPerFrame];
+            var projections = new WindowProjection[settings.WindowsPerFrame];
             for (var window = 0; window < settings.WindowsPerFrame; window++)
             {
                 var absoluteWindow = firstWindow + window;
@@ -583,16 +700,28 @@ public sealed class OfflineDemodulator
                 var scoreDiscard = ResolveWindowDiscards(settings, windowSamples, segmentRight - segmentLeft + 1);
                 var innerLeft = segmentLeft + scoreDiscard.LeadingSamples;
                 var innerRight = segmentRight - scoreDiscard.TrailingSamples;
-                analyses[window] = AnalyzeAmplitudes(ProjectWindow(data, waveform, innerLeft, innerRight, settings).Projections);
+                projections[window] = ProjectWindow(data, waveform, innerLeft, innerRight, settings);
+                analyses[window] = AnalyzeAmplitudes(projections[window].Projections);
             }
 
             var sequence = ChooseReferenceSequence(analyses);
+            var usableFrame = true;
             for (var window = 0; window < analyses.Length; window++)
             {
                 var analysis = analyses[window];
                 var expected = sequence.ExpectedChannel(window);
                 var top3Contiguous = analysis.TripletCenterChannel >= 0;
                 var expectedInTop3 = analysis.Top3Channels.Contains(expected);
+                var quality = ClassifyWindow(window, expected, analysis, projections[window], settings);
+                var validWindow = quality.State == DemodulatedWindowQualityState.Valid &&
+                    quality.Top3Contiguous && quality.Top1IsTripletCenter &&
+                    quality.TripletCenterChannel == expected;
+                if (validWindow)
+                {
+                    validWindowCount++;
+                }
+
+                usableFrame &= settings.IncludeCorrectedFramesInAverage ? !quality.Rejected : validWindow;
 
                 score += top3Contiguous ? 100.0 : -250.0;
                 if (analysis.TripletCenterChannel == expected)
@@ -636,9 +765,18 @@ public sealed class OfflineDemodulator
                     score += Math.Min(120.0, 30.0 * orderedAmplitudes[2] / orderedAmplitudes[3]);
                 }
             }
+
+            if (usableFrame)
+            {
+                usableFrameCount++;
+            }
         }
 
-        return (score / frameCount) + (includeFrameCountBonus ? 10000.0 * frameCount : 0.0);
+        return new UniformCadenceScore(
+            (score / frameCount) + (includeFrameCountBonus ? 10000.0 * frameCount : 0.0),
+            frameCount,
+            usableFrameCount,
+            validWindowCount);
     }
 
     private static IReadOnlyList<DemodulatedFrame> DemodulateFrames(
@@ -2119,8 +2257,14 @@ public sealed class OfflineDemodulator
 
     private sealed record UniformOffsetCandidate(
         int OffsetSamples,
-        double TopologyScore,
+        UniformCadenceScore Cadence,
         double IntegrationInstability = double.PositiveInfinity);
+
+    private readonly record struct UniformCadenceScore(
+        double Score,
+        int FrameCount,
+        int UsableFrameCount,
+        int ValidWindowCount);
 
     private readonly record struct UniformOffsetSelection(
         int OffsetSamples,

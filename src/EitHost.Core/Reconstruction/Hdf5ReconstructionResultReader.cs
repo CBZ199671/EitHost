@@ -15,7 +15,27 @@ public sealed class Hdf5ReconstructionResultReader
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputHdf5Path);
         var fullPath = Path.GetFullPath(outputHdf5Path);
-        using var file = Hdf5FileAccess.OpenReadWithRetry(fullPath);
+        using var handle = Hdf5FileAccess.OpenReadWithRetry(fullPath);
+        return ReadCore(new IndexedHdf5Group(handle), fullPath, blockNumber,
+            backendElapsed, outputPersisted, requireCanonicalMeshIndex);
+    }
+
+    public RealtimeReconstructionResult Read(
+        Stream stream,
+        int blockNumber,
+        TimeSpan backendElapsed,
+        bool requireCanonicalMeshIndex = false)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        using var handle = H5File.Open(stream, leaveOpen: true);
+        return ReadCore(new IndexedHdf5Group(handle), string.Empty, blockNumber,
+            backendElapsed, outputPersisted: false, requireCanonicalMeshIndex);
+    }
+
+    private static RealtimeReconstructionResult ReadCore(
+        IndexedHdf5Group file, string fullPath, int blockNumber,
+        TimeSpan backendElapsed, bool outputPersisted, bool requireCanonicalMeshIndex)
+    {
         if (TryReadBackendFailure(file) is { } backendFailure)
         {
             throw PyEidorsReconstructionException.FromBackend(
@@ -95,7 +115,7 @@ public sealed class Hdf5ReconstructionResultReader
             MeshIndexMetadata: meshIndexMetadata);
     }
 
-    private static BackendFailureMetadata? TryReadBackendFailure(IH5Group file)
+    private static BackendFailureMetadata? TryReadBackendFailure(IndexedHdf5Group file)
     {
         if (!file.AttributeExists("metadata_json"))
         {
@@ -138,7 +158,7 @@ public sealed class Hdf5ReconstructionResultReader
                 : null;
     }
 
-    private static ReconstructionMeshIndexMetadata ReadMeshIndexMetadata(IH5Group file)
+    private static ReconstructionMeshIndexMetadata ReadMeshIndexMetadata(IndexedHdf5Group file)
     {
         if (!file.AttributeExists("metadata_json"))
         {
@@ -203,7 +223,7 @@ public sealed class Hdf5ReconstructionResultReader
         }
     }
 
-    private static ContactJacobianReadResult TryReadContactJacobian(IH5Group file)
+    private static ContactJacobianReadResult TryReadContactJacobian(IndexedHdf5Group file)
     {
         const string datasetPath = "/contact_jacobian_208x16";
         if (!file.LinkExists(datasetPath))
@@ -320,7 +340,7 @@ public sealed class Hdf5ReconstructionResultReader
         return stacked;
     }
 
-    private static double[]? TryReadDoubleVector(IH5Group file, string datasetPath)
+    private static double[]? TryReadDoubleVector(IndexedHdf5Group file, string datasetPath)
     {
         if (!file.LinkExists(datasetPath))
         {
@@ -337,7 +357,7 @@ public sealed class Hdf5ReconstructionResultReader
         }
     }
 
-    private static double? TryReadDoubleScalar(IH5Group file, params string[] datasetPaths)
+    private static double? TryReadDoubleScalar(IndexedHdf5Group file, params string[] datasetPaths)
     {
         foreach (var datasetPath in datasetPaths)
         {
@@ -376,7 +396,7 @@ public sealed class Hdf5ReconstructionResultReader
         return null;
     }
 
-    private static int? TryReadIntScalar(IH5Group file, string datasetPath)
+    private static int? TryReadIntScalar(IndexedHdf5Group file, string datasetPath)
     {
         if (!file.LinkExists(datasetPath))
         {

@@ -131,6 +131,105 @@
         <Setter Property="Margin" Value="0,0,0,4" />
     </Style>
 
+    <!-- ════════ Layout density ════════
+         A 1080p laptop running 125-150% scaling hands the shell ~820 or ~670 DIP
+         of height, and the 实测 workbench spends it on fixed chrome bands plus a
+         fixed prose row above every plot. What operators actually read there is
+         the four live plot canvases and the ROI rail, so on a short viewport the
+         prose gives up its rows, the bands lose a few pixels each, and the plots
+         keep the difference. IsShortLayout / IsNarrowLayout are set by the shell
+         from its own arranged size, so these triggers follow the viewport rather
+         than the monitor. -->
+    <Style x:Key="ShellTitleBand" TargetType="Border">
+        <Setter Property="Height" Value="34" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsShortLayout, RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                <Setter Property="Height" Value="30" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+    <Style x:Key="ShellToolbarBand" TargetType="Border">
+        <Setter Property="Height" Value="46" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsShortLayout, RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                <Setter Property="Height" Value="40" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+    <Style x:Key="ShellTabBand" TargetType="Border">
+        <Setter Property="Height" Value="40" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsShortLayout, RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                <Setter Property="Height" Value="34" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+    <Style x:Key="ShellStatusBand" TargetType="Border">
+        <Setter Property="Height" Value="32" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsShortLayout, RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                <Setter Property="Height" Value="26" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- Fixed-height stat line above a plot: two wrapped lines normally, one on a
+         short viewport. The full text stays reachable through the tooltip. -->
+    <Style x:Key="PlotStatsText" TargetType="TextBlock" BasedOn="{StaticResource MonoText}">
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="Margin" Value="0,2,0,0" />
+        <Setter Property="Height" Value="30" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        <Setter Property="LineHeight" Value="15" />
+        <Setter Property="LineStackingStrategy" Value="BlockLineHeight" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsShortLayout, RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                <Setter Property="Height" Value="15" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+    <!-- Legend / provenance prose: nice to have, first to go when height is scarce. -->
+    <Style x:Key="PlotSecondaryText" TargetType="TextBlock" BasedOn="{StaticResource HintText}">
+        <Setter Property="FontSize" Value="10" />
+        <Setter Property="Margin" Value="0,2,0,0" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsShortLayout, RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                <Setter Property="Visibility" Value="Collapsed" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+    <Style x:Key="PlotCardTitleBar" TargetType="Grid">
+        <Setter Property="Height" Value="30" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsShortLayout, RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                <Setter Property="Height" Value="22" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+    <Style x:Key="PlotCardBody" TargetType="DockPanel">
+        <Setter Property="Margin" Value="12" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsShortLayout, RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                <Setter Property="Margin" Value="8" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+    <!-- The sunken well the plot canvas stretches into. -->
+    <Style x:Key="PlotSurface" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource SunkenBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource DividerBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="Padding" Value="8" />
+        <Setter Property="Margin" Value="0,10,0,0" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsShortLayout, RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                <Setter Property="Padding" Value="4" />
+                <Setter Property="Margin" Value="0,6,0,0" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
     <!-- ════════ Panel / card surface ════════ -->
     <Style x:Key="PanelCard" TargetType="Border">
         <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
@@ -751,6 +850,30 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+    </Style>
+
+    <!-- Selectors that live in a plot card title row: they shrink with the row so
+         the card keeps the same header height as its neighbours and the four wells
+         stay the same size. -->
+    <Style x:Key="PlotHeaderModeCombo" TargetType="ComboBox" BasedOn="{StaticResource {x:Type ComboBox}}">
+        <Setter Property="Height" Value="30" />
+        <Setter Property="MinWidth" Value="150" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsShortLayout, RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                <Setter Property="Height" Value="22" />
+                <Setter Property="MinWidth" Value="112" />
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+    <Style x:Key="PlotHeaderViewCombo" TargetType="ComboBox" BasedOn="{StaticResource {x:Type ComboBox}}">
+        <Setter Property="Height" Value="30" />
+        <Setter Property="MinWidth" Value="104" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsShortLayout, RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                <Setter Property="Height" Value="22" />
+                <Setter Property="MinWidth" Value="84" />
+            </DataTrigger>
+        </Style.Triggers>
     </Style>
 
     <!-- ════════ Status chip (pill) ════════

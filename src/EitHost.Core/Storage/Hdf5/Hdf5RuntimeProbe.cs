@@ -39,12 +39,29 @@ public static class Hdf5RuntimeProbe
         {
             try
             {
-                File.Delete(filePath);
+                DeleteProbeWithRetry(filePath);
             }
             catch (Exception cleanupException) when (primaryException is not null)
             {
                 primaryException.Data[CleanupFailureKey] = cleanupException.ToString();
             }
         }
+    }
+
+    internal static void DeleteProbeWithRetry(
+        string filePath,
+        Action<string>? delete = null,
+        Action<TimeSpan>? delay = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+        delete ??= File.Delete;
+        AtomicFileCommitter.ExecuteWithTransientLeaseRetry(
+            filePath,
+            () =>
+            {
+                delete(filePath);
+                return true;
+            },
+            delay);
     }
 }

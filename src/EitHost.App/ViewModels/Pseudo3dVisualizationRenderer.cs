@@ -11,33 +11,43 @@ internal static class Pseudo3dVisualizationRenderer
     private const int OutlineColor = unchecked((int)0xB8475569);
     private const int ConnectorColor = unchecked((int)0x90475569);
 
-    internal static ImageSource Render(LayeredPseudo3dVolume volume, int pixelSize = 512)
+    internal static ImageSource Render(LayeredPseudo3dVolume volume, int pixelSize = 512, (double Center, double Range)? lockedScale = null, int[]? reusablePixels = null)
     {
         ArgumentNullException.ThrowIfNull(volume);
         var edge = Math.Clamp(pixelSize, 192, 1024);
-        var pixels = new int[checked(edge * edge)];
+        var pixels = reusablePixels is { } buffer && buffer.Length == edge * edge ? buffer : new int[checked(edge * edge)];
         Array.Fill(pixels, BackgroundColor);
 
         var nodes = volume.SourceNodeCoords2d;
         var triangles = volume.SourceTriangleConnectivity;
         var values = volume.DisplayLayerTriangleConductivity;
         ValidatePayload(nodes, triangles, values, volume.DisplayLayerCount);
+        var relativeVariance = volume.DisplayLayerTriangleRelativeVariance;
+        if (relativeVariance is not null)
+        {
+            ValidatePayload(nodes, triangles, relativeVariance, volume.DisplayLayerCount);
+        }
 
-        var bounds = FindBounds(nodes);
-        var colorScale = FindColorScale(values);
+        var bounds = FindBounds(nodes, volume.NormalizedHeight);
+        var colorScale = lockedScale ?? FindColorScale(values);
         DrawLayerConnectors(pixels, edge, bounds);
         for (var layer = 0; layer < volume.DisplayLayerCount; layer++)
         {
-            var zFraction = volume.DisplayLayerCount == 1
-                ? 0.0
-                : (double)layer / (volume.DisplayLayerCount - 1);
+            var zFraction = (volume.DisplayLayerZ[layer] - volume.DisplayLayerZ[0]) / volume.NormalizedHeight;
             for (var triangle = 0; triangle < triangles.GetLength(0); triangle++)
             {
                 var p0 = Project(nodes, triangles[triangle, 0], zFraction, bounds, edge);
                 var p1 = Project(nodes, triangles[triangle, 1], zFraction, bounds, edge);
                 var p2 = Project(nodes, triangles[triangle, 2], zFraction, bounds, edge);
                 var color = ColorFor(values[layer, triangle], colorScale.Center, colorScale.Range);
-                FillTriangle(pixels, edge, p0, p1, p2, color, alpha: 174);
+                var alpha = relativeVariance is null
+                    ? (byte)174
+                    : (byte)Math.Round(
+                        174.0 * (1.0 - (0.55 * Math.Sqrt(Math.Clamp(
+                            relativeVariance[layer, triangle],
+                            0.0,
+                            1.0)))));
+                FillTriangle(pixels, edge, p0, p1, p2, color, alpha);
             }
 
             DrawLayerOutline(
@@ -83,7 +93,7 @@ internal static class Pseudo3dVisualizationRenderer
         }
     }
 
-    private static (double MinX, double MaxX, double MinY, double MaxY) FindBounds(double[,] nodes)
+    private static (double MinX, double MaxX, double MinY, double MaxY, double Height) FindBounds(double[,] nodes, double height)
     {
         var minX = double.PositiveInfinity;
         var maxX = double.NegativeInfinity;
@@ -109,54 +119,46 @@ internal static class Pseudo3dVisualizationRenderer
             maxY += 0.5;
         }
 
-        return (minX, maxX, minY, maxY);
+        return (minX, maxX, minY, maxY, height);
     }
 
-    private static (double Center, double Range) FindColorScale(double[,] values)
+    internal static (double Center, double Range) FindColorScale(double[,] values)
     {
         var finite = new List<double>(values.Length);
-        foreach (var value in values)
-        {
-            if (double.IsFinite(value))
-            {
-                finite.Add(value);
-            }
-        }
-
+        foreach (double value in values)
+            if (double.IsFinite(value)) finite.Add(value);
+        if (finite.Count == 0) return (0, 1);
         finite.Sort();
-        if (finite.Count == 0)
-        {
-            return (0.0, 1.0);
-        }
-
         var middle = finite.Count / 2;
-        var center = finite.Count % 2 == 0
-            ? 0.5 * (finite[middle - 1] + finite[middle])
-            : finite[middle];
-        var range = finite.Max(value => Math.Abs(value - center));
-        return (center, Math.Max(range, 1.0e-12));
+        var center = finite.Count % 2 == 0 ? (finite[middle - 1] + finite[middle]) * 0.5 : finite[middle];
+        var range = Math.Max(Math.Abs(finite[0] - center), Math.Abs(finite[^1] - center));
+        // A uniform first frame still establishes a finite locked scale. Subsequent
+        // global changes must be visible rather than being re-centered each frame.
+        return (center, Math.Max(range, Math.Max(Math.Abs(center) * 0.01, 1.0e-6)));
     }
-
-    private static (double X, double Y) Project(
+    internal static (double X, double Y) Project(
         double[,] nodes,
         int nodeIndex,
         double zFraction,
-        (double MinX, double MaxX, double MinY, double MaxY) bounds,
+        (double MinX, double MaxX, double MinY, double MaxY, double Height) bounds,
         int edge)
     {
-        var x = (nodes[nodeIndex, 0] - bounds.MinX) / (bounds.MaxX - bounds.MinX);
-        var y = (nodes[nodeIndex, 1] - bounds.MinY) / (bounds.MaxY - bounds.MinY);
-        var drawable = edge * 0.82;
-        var padding = edge * 0.09;
-        return (
-            padding + (x * drawable * 0.62) + (zFraction * drawable * 0.22),
-            padding + ((1.0 - y) * drawable * 0.38) + ((1.0 - zFraction) * drawable * 0.42));
+        var width = bounds.MaxX - bounds.MinX;
+        var depth = bounds.MaxY - bounds.MinY;
+        var x = nodes[nodeIndex, 0] - (bounds.MinX + bounds.MaxX) * 0.5;
+        var y = nodes[nodeIndex, 1] - (bounds.MinY + bounds.MaxY) * 0.5;
+        var z = (zFraction - 0.5) * bounds.Height;
+        // One uniform model-to-pixel scale preserves the actual axial / radial ratio.
+        // Orthographic camera pitched 30 degrees around X: no roll and no z→x shear.
+        const double vertical = 0.8660254037844386;
+        var scale = edge * 0.84 / Math.Max(width, depth * 0.5 + bounds.Height * vertical);
+        return (edge * 0.5 + x * scale,
+            edge * 0.5 - (y * 0.5 + z * vertical) * scale);
     }
-
     private static void DrawLayerConnectors(
         int[] pixels,
         int edge,
-        (double MinX, double MaxX, double MinY, double MaxY) bounds)
+        (double MinX, double MaxX, double MinY, double MaxY, double Height) bounds)
     {
         var nodes = new double[,]
         {
@@ -165,7 +167,7 @@ internal static class Pseudo3dVisualizationRenderer
             { (bounds.MinX + bounds.MaxX) * 0.5, bounds.MinY },
             { (bounds.MinX + bounds.MaxX) * 0.5, bounds.MaxY }
         };
-        var nodeBounds = (bounds.MinX, bounds.MaxX, bounds.MinY, bounds.MaxY);
+        var nodeBounds = bounds;
         for (var node = 0; node < nodes.GetLength(0); node++)
         {
             DrawLine(
@@ -181,7 +183,7 @@ internal static class Pseudo3dVisualizationRenderer
     private static void DrawLayerOutline(
         int[] pixels,
         int edge,
-        (double MinX, double MaxX, double MinY, double MaxY) bounds,
+        (double MinX, double MaxX, double MinY, double MaxY, double Height) bounds,
         double zFraction,
         byte alpha)
     {

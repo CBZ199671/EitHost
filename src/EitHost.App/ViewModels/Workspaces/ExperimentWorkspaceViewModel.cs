@@ -27,6 +27,13 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
     private readonly Func<IReadOnlyList<EitCatalogRunSummary>>? legacyRunLoader;
     private readonly IReadOnlyList<EitCatalog> legacyCatalogReaders;
     private readonly Dictionary<Guid, string> imagingRunStorePaths = [];
+    private IReadOnlyDictionary<Guid, Pseudo3dExperimentMember> pseudo3dMembers = new Dictionary<Guid, Pseudo3dExperimentMember>();
+
+    private IReadOnlyDictionary<Guid, Pseudo3dExperimentMember> LoadPseudo3dMembers()
+    {
+        experimentCatalog.RecoverPseudo3dMembers(message => DiagnosticMessage?.Invoke(message));
+        return experimentCatalog.ListPseudo3dMembers().ToDictionary(member => member.RunId);
+    }
     private readonly ObservableCollection<ImagingRunListItem> imagingRuns = [];
     private ICollectionView? experimentRunsView;
     private ICollectionView? recentRunsView;
@@ -273,6 +280,14 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
         get
         {
             var total = ExperimentRuns.Count;
+            if (ExperimentRuns.Any(item => item.IsPseudo3d))
+            {
+                var totalGroups = ExperimentRuns.Select(item => item.GroupKey).Distinct().Count();
+                if (selectedRunDate is null) return $"实验组 {totalGroups} · 设备记录 {total}";
+                var filtered = ExperimentRuns.Where(IsExperimentOnSelectedDate).ToArray();
+                var shownGroups = filtered.Select(item => item.GroupKey).Distinct().Count();
+                return $"{selectedRunDate.Value:yyyy-MM-dd} · 实验组 {shownGroups}/{totalGroups} · 设备记录 {filtered.Length}/{total}";
+            }
             if (selectedRunDate is null)
             {
                 return $"共 {total} 个实验";
@@ -405,15 +420,19 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
         try
         {
             var legacyRunsTask = Task.Run(LoadLegacyRecentRuns);
-            var canonicalRunsTask = initialCanonicalRuns is null
-                ? Task.Run(() => experimentCatalog.ListRunSummaries(RecentRunQueryLimit))
-                : Task.FromResult(initialCanonicalRuns);
-            await Task.WhenAll(legacyRunsTask, canonicalRunsTask).ConfigureAwait(true);
+            var groupsTask = Task.Run(LoadPseudo3dMembers);
+            var canonicalRunsTask = Task.Run(async () =>
+            {
+                await groupsTask.ConfigureAwait(false);
+                return experimentCatalog.ListRunSummaries(RecentRunQueryLimit);
+            });
+            await Task.WhenAll(legacyRunsTask, canonicalRunsTask, groupsTask).ConfigureAwait(true);
             if (requestVersion != Volatile.Read(ref legacyRefreshVersion))
             {
                 return;
             }
 
+            pseudo3dMembers = groupsTask.Result;
             ReplaceRecentRuns(legacyRunsTask.Result, canonicalRunsTask.Result);
         }
         catch (Exception ex)
@@ -495,13 +514,19 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
         {
             var requestVersion = Interlocked.Increment(ref legacyRefreshVersion);
             var legacyRunsTask = Task.Run(LoadLegacyRecentRuns);
-            var canonicalRunsTask = Task.Run(() => experimentCatalog.ListRunSummaries(RecentRunQueryLimit));
-            await Task.WhenAll(legacyRunsTask, canonicalRunsTask).ConfigureAwait(true);
+            var groupsTask = Task.Run(LoadPseudo3dMembers);
+            var canonicalRunsTask = Task.Run(async () =>
+            {
+                await groupsTask.ConfigureAwait(false);
+                return experimentCatalog.ListRunSummaries(RecentRunQueryLimit);
+            });
+            await Task.WhenAll(legacyRunsTask, canonicalRunsTask, groupsTask).ConfigureAwait(true);
             if (requestVersion != Volatile.Read(ref legacyRefreshVersion))
             {
                 return;
             }
 
+            pseudo3dMembers = groupsTask.Result;
             ReplaceRecentRuns(legacyRunsTask.Result, canonicalRunsTask.Result);
             await legacyReplayRefresh().ConfigureAwait(true);
             await RefreshDataRootStorageAsync(updateStatusMessage: false).ConfigureAwait(true);
@@ -1115,6 +1140,7 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
             return;
         }
 
+        pseudo3dMembers = experimentCatalog.ListPseudo3dMembers().ToDictionary(member => member.RunId);
         var previousKey = selectedExperimentRun?.Key;
         var imagingById = imagingRuns
             .GroupBy(item => item.Summary.ImagingRunId)
@@ -1187,12 +1213,14 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
             summary.PrimaryRawArtifactPath is null
                 ? null
                 : dataLayout.ResolveArtifactPath(summary.PrimaryRawArtifactPath),
-            dataLayout.ResolveArtifactPath(summary.Run.RunDirectory));
+            dataLayout.ResolveArtifactPath(summary.Run.RunDirectory),
+            pseudo3dMembers.GetValueOrDefault(summary.Run.ExperimentRunId));
     }
 
     private ICollectionView CreateExperimentRunsView()
     {
         var view = CollectionViewSource.GetDefaultView(ExperimentRuns);
+        view.GroupDescriptions.Add(new PropertyGroupDescription(nameof(ExperimentRunListItem.GroupKey)));
         view.Filter = item => item is not ExperimentRunListItem run ||
                               selectedRunDate is null ||
                               IsExperimentOnSelectedDate(run);

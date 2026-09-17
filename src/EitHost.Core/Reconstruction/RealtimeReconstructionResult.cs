@@ -1,5 +1,8 @@
 namespace EitHost.Core.Reconstruction;
 
+// Published result arrays have a single writer (the backend reader) and remain
+// read-only after publication. Consumers may retain references; transformations
+// must allocate their changed arrays. These buffers are never returned to a pool.
 public sealed record RealtimeReconstructionResult(
     int BlockNumber,
     string OutputHdf5Path,
@@ -40,8 +43,11 @@ public sealed record RealtimeReconstructionResult(
     string? ContactJacobianSource = null,
     string ReconstructionScaleStatus = ReconstructionScale.ModelRelative,
     string ReconstructionScaleProvenance = ReconstructionScale.NormalizedModelProvenance,
-    ReconstructionMeshIndexMetadata? MeshIndexMetadata = null)
+    ReconstructionMeshIndexMetadata? MeshIndexMetadata = null,
+    double? ImageQualityScore = null)
 {
+    public Acquisition.Pseudo3dAcquisitionStamp? TimeDivision { get; init; }
+
     private ReconstructionMeshIndexMetadata EffectiveMeshIndexMetadata =>
         MeshIndexMetadata ?? ReconstructionMeshIndexMetadata.LegacyCell;
 

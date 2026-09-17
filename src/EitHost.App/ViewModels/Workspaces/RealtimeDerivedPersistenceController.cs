@@ -33,6 +33,8 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
     private readonly RealtimePersistenceQueue<DerivedPersistenceWork> derivedPersistenceQueue;
     private readonly SemaphoreSlim liveCommitGate = new(1, 1);
     private readonly ConcurrentDictionary<(Guid RunId, int BlockNumber), Task> pendingLiveCommits = new();
+    private readonly RealtimePersistenceQueue<LiveCommitWork> liveIndexQueue;
+    private readonly Action<Guid>? requestStorageStop;
     private readonly ConcurrentDictionary<(Guid RunId, int BlockNumber), Task> pendingTrustedNeutralEvidence = new();
 
     internal RealtimeDerivedPersistenceController(
@@ -41,7 +43,8 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         DerivedArtifactHdf5Writer writer,
         ExperimentBackendExchangeArchiver backendExchangeArchiver,
         Action<string> diagnostic,
-        Action<string> backendArchiveWarning)
+        Action<string> backendArchiveWarning,
+        Action<Guid>? requestStorageStop = null)
     {
         this.dataLayout = dataLayout ?? throw new ArgumentNullException(nameof(dataLayout));
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
@@ -50,10 +53,24 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         this.backendExchangeArchiver = backendExchangeArchiver ?? throw new ArgumentNullException(nameof(backendExchangeArchiver));
         this.diagnostic = diagnostic ?? throw new ArgumentNullException(nameof(diagnostic));
         this.backendArchiveWarning = backendArchiveWarning ?? throw new ArgumentNullException(nameof(backendArchiveWarning));
+        this.requestStorageStop = requestStorageStop;
         derivedPersistenceQueue = new RealtimePersistenceQueue<DerivedPersistenceWork>(
             DerivedPersistenceQueueCapacity,
             work => work.Execute(),
             work => work.OnAbandoned?.Invoke());
+        liveIndexQueue = new RealtimePersistenceQueue<LiveCommitWork>(128, async work =>
+        {
+            try
+            {
+                await CommitLivePresentationCoreAsync(work.Commit).ConfigureAwait(false);
+                work.Completion.TrySetResult();
+            }
+            catch (Exception ex) { work.Completion.TrySetException(ex); }
+            finally
+            {
+                pendingLiveCommits.TryRemove((work.Commit.Frame.ExperimentRunId, work.Commit.Frame.SourceBlockNumber), out _);
+            }
+        });
     }
 
     internal async Task PersistDemodulatedBlockAsync(
@@ -68,6 +85,63 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
 
         await EnqueuePersistenceAsync(
             () => PersistDemodulatedBlockCoreAsync(config, state, block)).ConfigureAwait(false);
+    }
+
+    internal async Task PersistPseudo3dAsync(Pseudo3dVisualizationPresentation presentation)
+    {
+        if (presentation.Volume is not { } volume ||
+            presentation.LowerSource is not { } lower || presentation.UpperSource is not { } upper ||
+            presentation.LowerContext?.State is not RealtimeRunState lowerState ||
+            presentation.UpperContext?.State is not RealtimeRunState upperState ||
+            lowerState.Config is not { PersistImagingFrames: true } lowerConfig ||
+            upperState.Config is not { PersistImagingFrames: true } upperConfig ||
+            !lowerState.ExperimentCatalogRunStarted || !upperState.ExperimentCatalogRunStarted)
+            return;
+        var lowerEpoch = presentation.LowerContext.ReferenceEpoch;
+        var upperEpoch = presentation.UpperContext.ReferenceEpoch;
+        var lowerGeneration = presentation.LowerContext.DynamicGeneration;
+        var upperGeneration = presentation.UpperContext.DynamicGeneration;
+        var lowerStartedAt = lowerState.ExperimentStartedAt;
+        // Admission follows accepted independent 2D frames. The same FIFO has already
+        // accepted their writes; no 2D HDF5 result is read back to compute this volume.
+        await EnqueuePersistenceAsync(() =>
+        {
+            try
+            {
+                Pseudo3dArchiveSource Source(RealtimeImagingRunConfig config, LayeredPseudo3dSource source, int epoch, int generation)
+                {
+                    var block = catalog.GetProcessingBlock(config.ImagingRunId, source.Result.BlockNumber)
+                        ?? throw new InvalidDataException("Pseudo-3D source block is missing from the catalog.");
+                    var artifact = catalog.ListDerivedArtifacts(config.ImagingRunId, source.Result.BlockNumber)
+                        .SingleOrDefault(item => item.Kind == "reconstruction")
+                        ?? throw new InvalidDataException("Pseudo-3D source reconstruction was not persisted.");
+                    return new(config.ImagingRunId, source.SetLabel, source.Result.BlockNumber,
+                        block.SourceStartSampleIndex, block.SourceEndSampleIndex, source.AcquiredAt,
+                        epoch, generation, artifact.ArtifactPath, artifact.DatasetPath) { TimeDivision = source.Result.TimeDivision };
+                }
+                var metadata = new Pseudo3dArchiveMetadata(
+                    Source(lowerConfig, lower, lowerEpoch, lowerGeneration),
+                    Source(upperConfig, upper, upperEpoch, upperGeneration),
+                    presentation.ConfigurationGeneration, volume.Algorithm, volume.AlgorithmProvenance,
+                    volume.ReconstructionScaleStatus, volume.ReconstructionScaleProvenance,
+                    volume.NormalizedHeight, volume.DisplayLayerCount, presentation.ColorScale, presentation.Warning,
+                    presentation.LockedColorScale?.Center, presentation.LockedColorScale?.Range);
+                var directory = dataLayout.GetRunDirectory(lowerConfig.ImagingRunId, lowerStartedAt);
+                var shard = (Math.Max(1, lower.Result.BlockNumber) - 1) / DataRootLayout.DerivedBlocksPerShard;
+                var path = Path.Combine(directory, "pseudo3d", $"pseudo3d_{shard:D6}.h5");
+                var locator = new Pseudo3dArchiveStore().Write(path, metadata, volume);
+                catalog.RegisterDerivedArtifact(new DerivedArtifactCatalogRecord(
+                    lowerConfig.ImagingRunId, lower.Result.BlockNumber, "pseudo3d:" + locator.Split('/')[2],
+                    dataLayout.ToRelativeArtifactPath(path), locator, DateTimeOffset.UtcNow));
+            }
+            catch (Exception ex)
+            {
+                backendArchiveWarning($"伪三维关联保存失败：{ex.Message}");
+                requestStorageStop?.Invoke(lowerConfig.ImagingRunId);
+                requestStorageStop?.Invoke(upperConfig.ImagingRunId);
+            }
+            return Task.CompletedTask;
+        }).ConfigureAwait(false);
     }
 
     internal void QueueTrustedNeutralEvidence(
@@ -223,6 +297,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
     internal async Task<RealtimePersistedLiveFrameEvidence?> PersistReconstructionResultAsync(
         RealtimeImagingRunConfig config,
         RealtimeRunState state,
+        int referenceEpoch,
         RealtimeDemodulatedBlock block,
         RealtimeReconstructionResult result,
         double? imageQualityScore,
@@ -246,6 +321,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
             result,
             measurementWeights,
             dynamicKalman,
+            referenceEpoch,
             processedAt,
             persistenceReady.Task);
         await EnqueuePersistenceAsync(
@@ -260,6 +336,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
                 measurementWeights,
                 weightPolicyVersion,
                 dynamicKalman,
+                referenceEpoch,
                 processedAt,
                 liveEvidence,
                 persistenceReady),
@@ -347,6 +424,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         IReadOnlyList<double> measurementWeights,
         string weightPolicyVersion,
         RealtimeDynamicKalmanOptions? dynamicKalman,
+        int referenceEpoch,
         DateTimeOffset processedAt,
         RealtimePersistedLiveFrameEvidence? liveEvidence,
         TaskCompletionSource<bool> persistenceReady)
@@ -409,7 +487,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
                     result.RawConductivity,
                     imageQualityScore,
                     result.WeightedSystemConditionNumber,
-                    ReferenceEpoch: state.ReferenceEpoch > 0 ? state.ReferenceEpoch : null,
+                    ReferenceEpoch: referenceEpoch > 0 ? referenceEpoch : null,
                     WeightPolicyVersion: weightPolicyVersion,
                     ReferenceVoltage208: reference.ToArray(),
                     TargetVoltage208: target.ToArray(),
@@ -467,19 +545,23 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(commit);
         var key = (commit.Frame.ExperimentRunId, commit.Frame.SourceBlockNumber);
-        var task = CommitLivePresentationCoreAsync(commit);
-        pendingLiveCommits[key] = task;
-        _ = task.ContinueWith(
-            (_, state) =>
-            {
-                var tuple = ((ConcurrentDictionary<(Guid, int), Task> Dictionary, (Guid, int) Key))state!;
-                tuple.Dictionary.TryRemove(tuple.Key, out Task? _);
-            },
-            (pendingLiveCommits, key),
-            CancellationToken.None,
-            TaskContinuationOptions.ExecuteSynchronously,
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pending = pendingLiveCommits.GetOrAdd(key, completion.Task);
+        if (!ReferenceEquals(pending, completion.Task)) return pending;
+        if (!liveIndexQueue.TryEnqueue(new LiveCommitWork(commit, completion)))
+        {
+            pendingLiveCommits.TryRemove(key, out _);
+            var message = $"{commit.Frame.SetLabel} 实时回放索引队列已满；正在停止采集。二维数据已独立保存，此次显示记录未入索引。";
+            backendArchiveWarning(message);
+            requestStorageStop?.Invoke(commit.Frame.ExperimentRunId);
+            completion.TrySetException(new IOException(message));
+        }
+        // UI posts do not await indexing. Observe failures without creating a task
+        // per frame that waits on the shared SQL gate.
+        _ = completion.Task.ContinueWith(task => diagnostic(task.Exception!.GetBaseException().Message),
+            CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
-        return task;
+        return completion.Task;
     }
 
     internal async Task PublishLiveRevisionAsync(Guid experimentRunId, long rawDenominator)
@@ -570,7 +652,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
 
     private async Task CommitLivePresentationCoreAsync(RealtimeLiveFrameCommit commit)
     {
-        if (!await commit.Frame.PersistenceReady.ConfigureAwait(false))
+        if (!await commit.Frame.PersistenceReady.ConfigureAwait(ConfigureAwaitOptions.ForceYielding))
         {
             diagnostic(
                 $"{commit.Frame.SetLabel} live replay excluded block={commit.Frame.SourceBlockNumber}: reconstruction artifact was not persisted");
@@ -580,26 +662,12 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         await liveCommitGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (catalog.GetReconstructionLaneFrame(
-                    commit.Frame.ExperimentRunId,
-                    ReconstructionLane.Live,
-                    commit.Frame.RevisionId,
-                    commit.Frame.SourceBlockNumber) is not null)
-            {
-                return;
-            }
-
-            var existing = catalog.ListReconstructionLaneFrames(
-                commit.Frame.ExperimentRunId,
-                ReconstructionLane.Live,
-                commit.Frame.RevisionId);
-            var sequence = existing.Count == 0 ? 1 : existing.Max(item => item.SequenceNumber) + 1;
-            catalog.RecordReconstructionLaneFrame(new ReconstructionLaneFrameCatalogRecord(
+            catalog.AppendReconstructionLaneFrame(new ReconstructionLaneFrameCatalogRecord(
                 commit.Frame.ExperimentRunId,
                 ReconstructionLane.Live,
                 commit.Frame.RevisionId,
                 commit.Frame.SourceBlockNumber,
-                sequence,
+                1,
                 string.Equals(commit.Presentation.OverlayDisposition, "neutral", StringComparison.Ordinal)
                     ? ReconstructionFrameOutcome.Neutral
                     : ReconstructionFrameOutcome.Reconstructed,
@@ -620,6 +688,9 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         {
             diagnostic(
                 $"{commit.Frame.SetLabel} live replay index failed block={commit.Frame.SourceBlockNumber}: {ex.Message}");
+            backendArchiveWarning($"{commit.Frame.SetLabel} 实时回放索引失败：{ex.Message}");
+            requestStorageStop?.Invoke(commit.Frame.ExperimentRunId);
+            throw;
         }
         finally
         {
@@ -681,6 +752,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         RealtimeReconstructionResult result,
         IReadOnlyList<double> measurementWeights,
         RealtimeDynamicKalmanOptions? dynamicKalman,
+        int referenceEpoch,
         DateTimeOffset processedAt,
         Task<bool> persistenceReady)
     {
@@ -731,7 +803,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
             HashDoubles(result.Conductivity),
             dynamicKalman.SessionId,
             "updated",
-            state.ReferenceEpoch,
+            referenceEpoch,
             persistenceReady);
     }
 
@@ -920,6 +992,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await derivedPersistenceQueue.DisposeAsync().ConfigureAwait(false);
+        await liveIndexQueue.DisposeAsync().ConfigureAwait(false);
         liveCommitGate.Dispose();
     }
 
@@ -1003,6 +1076,7 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         RealtimeRunState state,
         RealtimeDemodulatedBlock block)
     {
+        if (block.TimeDivision is { } slot) return slot.SampleMidpoint;
         var startedAt = state.ExperimentStartedAt == default
             ? DateTimeOffset.UtcNow
             : state.ExperimentStartedAt;
@@ -1066,9 +1140,11 @@ internal sealed class RealtimeDerivedPersistenceController : IAsyncDisposable
         var item = new DerivedPersistenceWork(work, onAbandoned);
         if (!derivedPersistenceQueue.TryEnqueue(item))
         {
+            backendArchiveWarning("保存队列已满，等待磁盘写入；已接收数据继续保存。");
             await derivedPersistenceQueue.EnqueueAsync(item).ConfigureAwait(false);
         }
     }
 
     private sealed record DerivedPersistenceWork(Func<Task> Execute, Action? OnAbandoned);
+    private sealed record LiveCommitWork(RealtimeLiveFrameCommit Commit, TaskCompletionSource Completion);
 }

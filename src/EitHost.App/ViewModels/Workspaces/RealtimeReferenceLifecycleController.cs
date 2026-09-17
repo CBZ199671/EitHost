@@ -93,6 +93,7 @@ internal sealed class RealtimeReferenceLifecycleController
             return;
         }
 
+        state.BeginReferenceTransition();
         state.ReferenceIsProvisional = false;
         state.ReferenceVoltage208 = null;
         state.ReferenceUsesCommonScaleNormalization = false;
@@ -120,8 +121,6 @@ internal sealed class RealtimeReferenceLifecycleController
         state.ContactCalibrationFrames.Clear();
         state.ImageRasterCache.ResetColorScale();
         ResetRealtimeTemporalWindow(state);
-        state.DynamicKalmanGeneration++;
-        state.DynamicKalmanResetPending = true;
         callbacks.Diagnostic($"{config.SetLabel} provisional reference invalidated: {reason}");
         callbacks.PublishReferenceSummary(
             config.SetLabel,
@@ -148,6 +147,7 @@ internal sealed class RealtimeReferenceLifecycleController
         }
 
         var previousFaults = string.Join(',', current.FaultElectrodes);
+        state.BeginReferenceTransition();
         state.ReferenceVoltage208 = null;
         state.ReferenceUsesCommonScaleNormalization = false;
         state.LatestCommonScaleNormalizationFactor = null;
@@ -166,9 +166,6 @@ internal sealed class RealtimeReferenceLifecycleController
         ResetStartupProgress(state);
         state.ReferenceBlockNumber = 0;
         state.ReferenceStartSampleIndex = -1;
-        state.ReferenceInvalidated = false;
-        state.DynamicKalmanGeneration++;
-        state.DynamicKalmanResetPending = true;
         ResetRealtimeTemporalWindow(state);
         callbacks.PublishReferenceInvalidated(config.SetLabel, false);
         callbacks.PublishReferenceSummary(
@@ -213,6 +210,7 @@ internal sealed class RealtimeReferenceLifecycleController
         var reference = update.Reference;
         state.StartupDegradedReferenceWarmupCount = reference.RobustReference.FrameCount;
         state.StartupDegradedReferenceFaultElectrodes = reference.FaultElectrodes.ToArray();
+        state.BeginReferenceTransition();
         state.ReferenceVoltage208 = reference.RobustReference.Voltage208.ToArray();
         ActivateRealtimeReferenceEpoch(state, block, reference.RobustReference);
         state.ReferenceIsProvisional = false;
@@ -223,7 +221,6 @@ internal sealed class RealtimeReferenceLifecycleController
         state.BoundaryNoChangeActive = false;
         state.ReferenceBlockNumber = block.BlockNumber;
         state.ReferenceResetRequested = false;
-        state.ReferenceInvalidated = false;
         state.ContactMonitor = null;
         state.ContactCalibration = null;
         state.ExportableContactCalibration = null;
@@ -232,8 +229,6 @@ internal sealed class RealtimeReferenceLifecycleController
         Volatile.Write(ref state.ReferenceCandidateStrictGreenCount, 0);
         Interlocked.Exchange(ref state.ManualReferenceLockRequested, 0);
         state.ContactCalibrationFrames.Clear();
-        state.DynamicKalmanGeneration++;
-        state.DynamicKalmanResetPending = true;
         state.ResetReconstructionCircuitBreaker("startup_degraded_reference_locked");
         callbacks.Diagnostic($"{config.SetLabel} {update.Status} block={block.BlockNumber}");
         callbacks.PublishReferenceInvalidated(config.SetLabel, false);
@@ -253,6 +248,8 @@ internal sealed class RealtimeReferenceLifecycleController
         RealtimeDemodulatedBlock block)
     {
         var sequenceBefore = state.ReferenceCandidateNextSequence;
+        var continuousBefore = Volatile.Read(ref state.ReferenceCandidateContinuousCount);
+        var continuityBreakObserved = state.ReferenceCandidateContinuityBreakPending;
         var fingerprint = new EcdCwrReferenceOperatingPoint(
             config.DacSettings.ActualFrequencyHz,
             config.DacSettings.Gain,
@@ -278,7 +275,8 @@ internal sealed class RealtimeReferenceLifecycleController
         {
             if (!EcdCwrRobustReferenceBuilder.IsStrictGreenFrame(frame))
             {
-                state.ReferenceCandidateContinuityBreakPending = true;
+                state.MarkReferenceCandidateContinuityBreak();
+                continuityBreakObserved = true;
                 continue;
             }
 
@@ -349,6 +347,11 @@ internal sealed class RealtimeReferenceLifecycleController
 
         if (state.ReferenceCandidateNextSequence == sequenceBefore)
         {
+            if (continuityBreakObserved)
+            {
+                callbacks.NotifyUi(config.SetLabel, RealtimeReferenceUiChange.RefreshWindowsAndAllCommands);
+            }
+
             return;
         }
 
@@ -368,10 +371,38 @@ internal sealed class RealtimeReferenceLifecycleController
 
         Volatile.Write(ref state.ReferenceCandidateStrictGreenCount, memoryCount);
         Volatile.Write(ref state.ReferenceCandidateContinuousCount, continuousCount);
-        if (state.ReferenceCandidateNextSequence / 25 != sequenceBefore / 25)
+        if (ShouldNotifyCandidateUi(
+                sequenceBefore,
+                state.ReferenceCandidateNextSequence,
+                state.ReplacementReferenceCollecting,
+                state.ReplacementReferenceStartSequence,
+                continuousBefore,
+                continuousCount,
+                continuityBreakObserved))
         {
             callbacks.NotifyUi(config.SetLabel, RealtimeReferenceUiChange.RefreshWindowsAndAllCommands);
         }
+    }
+
+    internal static bool ShouldNotifyCandidateUi(
+        long sequenceBefore,
+        long sequenceAfter,
+        bool replacementCollecting,
+        long? replacementStartSequence,
+        int continuousBefore,
+        int continuousAfter,
+        bool continuityBreakObserved)
+    {
+        static long CountPostStart(long sequence, long startSequence, int continuousCount) =>
+            Math.Min(Math.Max(0, sequence - startSequence), Math.Max(0, continuousCount));
+
+        var crossedReplacementReadiness = replacementCollecting &&
+            replacementStartSequence is { } startSequence &&
+            CountPostStart(sequenceBefore, startSequence, continuousBefore) < RealtimeContactCalibrationMaximumFrames &&
+            CountPostStart(sequenceAfter, startSequence, continuousAfter) >= RealtimeContactCalibrationMaximumFrames;
+        return sequenceAfter / 25 != sequenceBefore / 25 ||
+            continuityBreakObserved ||
+            crossedReplacementReadiness;
     }
 
     internal static EcdCwrRobustReferenceOptions CreateRobustReferenceOptions(
@@ -383,7 +414,8 @@ internal sealed class RealtimeReferenceLifecycleController
                 config.ReferenceScalePolicy),
             PhysicalAdcLsbVolts: Usb2070VoltageScale.GetLsbVolts(
                 config.AcquisitionSettings.Range),
-            DetrendNoiseModel: true);
+            DetrendNoiseModel: true,
+            UseShortTermNoiseModel: true);
     }
 
     internal bool CommitPreparedSwitch(
@@ -412,6 +444,7 @@ internal sealed class RealtimeReferenceLifecycleController
                 replacementFrames = state.ReplacementPreparedFrames;
                 lockKind = state.ReplacementPreparedLockKind;
 
+                state.BeginReferenceTransition();
                 state.ReferenceVoltage208 = replacement.Voltage208.ToArray();
                 state.RobustReference = replacement;
                 state.ReferenceIsProvisional = false;
@@ -430,7 +463,6 @@ internal sealed class RealtimeReferenceLifecycleController
                     state.ReplacementReferenceSynchronizedSetCount;
                 state.ReferenceBlockNumber = block.BlockNumber;
                 state.ReferenceResetRequested = false;
-                state.ReferenceInvalidated = false;
                 state.BaselineIntegrityNoiseModel = replacement.NoiseModel;
                 state.BoundaryNoiseModel = replacement.NoiseModel;
                 state.BoundaryChangeGate = replacement.NoiseModel is null
@@ -451,8 +483,6 @@ internal sealed class RealtimeReferenceLifecycleController
                 state.LatestContactResult = null;
                 state.ImageRasterCache.ResetColorScale();
                 ResetRealtimeTemporalWindow(state);
-                state.DynamicKalmanGeneration++;
-                state.DynamicKalmanResetPending = true;
                 state.ResetReconstructionCircuitBreaker("replacement_reference_switched");
                 Volatile.Write(
                     ref state.ContactSubspaceEvidence,
@@ -615,6 +645,7 @@ internal sealed class RealtimeReferenceLifecycleController
                 : new EcdCwrRobustReferenceBuilder().Create(
                     selectedReferenceFrames,
                     referenceOptions);
+            state.BeginReferenceTransition();
             state.ReferenceVoltage208 = robustReference.Voltage208.ToArray();
             state.ReferenceIsProvisional = action == EcdCwrReferenceLockAction.LockProvisional;
             if (action == EcdCwrReferenceLockAction.LockUserSelected)
@@ -663,10 +694,7 @@ internal sealed class RealtimeReferenceLifecycleController
             ResetStartupProgress(state);
             state.ReferenceBlockNumber = block.BlockNumber;
             state.ReferenceResetRequested = false;
-            state.ReferenceInvalidated = false;
             ResetRealtimeTemporalWindow(state);
-            state.DynamicKalmanGeneration++;
-            state.DynamicKalmanResetPending = true;
             state.ResetReconstructionCircuitBreaker("reference_locked");
             if (state.ReferenceIsProvisional)
             {

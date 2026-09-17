@@ -46,7 +46,7 @@ public sealed class DerivedArtifactHdf5Writer
             new StageTiming("demod", data.AcquiredAt, data.ProcessedAt),
             snapshot =>
             {
-                snapshot.Content["demod"] = new H5Group
+                var demod = new H5Group
                 {
                     ["mean_amplitude_208"] = block.MeanAmplitude208,
                     ["mean_real_208"] = block.MeanReal208,
@@ -55,6 +55,9 @@ public sealed class DerivedArtifactHdf5Writer
                     ["mean_full_real_256"] = block.MeanFullReal256,
                     ["mean_full_imaginary_256"] = block.MeanFullImaginary256
                 };
+                if (block.TimeDivision is { } stamp)
+                    demod["time_division_json"] = JsonSerializer.Serialize(stamp);
+                snapshot.Content["demod"] = demod;
                 snapshot.Content["quality"] = new H5Group
                 {
                     ["weight"] = block.QualityWeight,
@@ -412,7 +415,7 @@ public sealed class DerivedArtifactHdf5Writer
         var snapshot = new BlockArtifactSnapshot();
         if (file.LinkExists("/demod"))
         {
-            snapshot.Content["demod"] = new H5Group
+            var demod = new H5Group
             {
                 ["mean_amplitude_208"] = file.Dataset("/demod/mean_amplitude_208").Read<double[]>(),
                 ["mean_real_208"] = file.Dataset("/demod/mean_real_208").Read<double[]>(),
@@ -421,6 +424,9 @@ public sealed class DerivedArtifactHdf5Writer
                 ["mean_full_real_256"] = file.Dataset("/demod/mean_full_real_256").Read<double[]>(),
                 ["mean_full_imaginary_256"] = file.Dataset("/demod/mean_full_imaginary_256").Read<double[]>()
             };
+            if (file.LinkExists("/demod/time_division_json"))
+                demod["time_division_json"] = file.Dataset("/demod/time_division_json").Read<string>();
+            snapshot.Content["demod"] = demod;
             snapshot.Content["quality"] = new H5Group
             {
                 ["weight"] = ReadOptional(file, "/quality/weight", 1.0),
@@ -606,6 +612,7 @@ public sealed class DerivedArtifactHdf5Writer
             "/demod/mean_full_amplitude_256",
             "/demod/mean_full_real_256",
             "/demod/mean_full_imaginary_256",
+            "/demod/time_division_json",
             "/quality/weight",
             "/quality/is_high_quality",
             "/quality/accepted_frames",
