@@ -66,17 +66,18 @@ PyEIDORS v2 是下一代重大版本，包含大量新增能力、架构改进�
 ### 运行已发布的 Windows x64 版本
 
 1. 从硬件厂商提供的安装包安装 USB2070 Windows 驱动。
-2. 克隆或下载本仓库。
-3. 从 [最新 release](https://github.com/CBZ199671/EitHost/releases/latest) 下载 `EitHost.App.exe`，放入 `release/EitHost-Windows-x64`。自包含 EXE 超过 GitHub 单文件 100 MiB 上限，因此作为 release 附件分发，不纳入仓库跟踪；从源码构建也会生成同一个 EXE。
-4. 完整保留 `release/EitHost-Windows-x64` 目录，然后运行：
+2. 从 [最新 release](https://github.com/CBZ199671/EitHost/releases/latest) 下载 `EitHost-<版本>-Windows-x64.zip`，或体积更小的 `.7z`。仅运行程序无需克隆本仓库。
+3. 将整个 `EitHost-Windows-x64` 文件夹解压到一个可写的固定位置，然后运行：
 
 ```powershell
-.\release\EitHost-Windows-x64\EitHost.App.exe
+.\EitHost-Windows-x64\EitHost.App.exe
 ```
 
-不要只复制单个 `.exe`。程序需要同目录中的 `HDF.PInvoke.dll`、`HDF.PInvoke.dll.config`、`hdf5.dll`、`hdf5_hl.dll` 和 `USB2070.dll`。启动时会在打开硬件前真实执行一次 HDF5 创建、写入、关闭和删除探针。仓库不包含 USB2070 内核驱动安装包。
+不要在压缩包内直接运行，也不要只复制单个 `.exe`。程序需要同目录中的 `HDF.PInvoke.dll`、`HDF.PInvoke.dll.config`、`hdf5.dll`、`hdf5_hl.dll` 和 `USB2070.dll`。启动时会在打开硬件前真实执行一次 HDF5 创建、写入、关闭和删除探针。发布包不含 USB2070 内核驱动安装包。
 
-发布文件的使用方法与 SHA-256 校验说明见 [`release/EitHost-Windows-x64/README.md`](release/EitHost-Windows-x64/README.md)。
+每个归档内都带有覆盖全部打包文件的 `SHA256SUMS.txt`，每次发布也会公布归档自身的 SHA-256。发布文件的使用方法与校验说明见 [`release/EitHost-Windows-x64/README.md`](release/EitHost-Windows-x64/README.md)。
+
+仓库中的 `release/EitHost-Windows-x64` 保留发布包的随附文件与校验值，但不含可执行文件：自包含 EXE 超过 GitHub 单文件 100 MiB 上限，因此作为 release 附件分发，从源码构建也会生成同一个 EXE。
 
 **本项目统一发布规则：** 每次完成修改并通过相关验证后，运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-eithost.ps1`，更新唯一运行目录 `release/EitHost-Windows-x64` 并保留现有 `Data`。版本从项目文件读取，不再自动生成分散的日期/版本目录。详见 [发布规则](packaging/RELEASE-RULES.md)。
 

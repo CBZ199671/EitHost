@@ -66,17 +66,18 @@ While the associated research manuscript is being prepared, the PyEIDORS v2 sour
 ### Run the published Windows x64 build
 
 1. Install the USB2070 Windows driver supplied by the hardware vendor.
-2. Clone or download this repository.
-3. Download `EitHost.App.exe` from the [latest release](https://github.com/CBZ199671/EitHost/releases/latest) and place it in `release/EitHost-Windows-x64`. The self-contained EXE exceeds GitHub's 100 MiB file limit, so it is distributed as a release asset instead of being tracked in the repository. Building from source produces the same EXE.
-4. Keep the complete `release/EitHost-Windows-x64` directory together, then run:
+2. Download `EitHost-<version>-Windows-x64.zip`, or the smaller `.7z`, from the [latest release](https://github.com/CBZ199671/EitHost/releases/latest). Running the application does not require cloning this repository.
+3. Extract the whole `EitHost-Windows-x64` folder to a writable, permanent location, then run:
 
 ```powershell
-.\release\EitHost-Windows-x64\EitHost.App.exe
+.\EitHost-Windows-x64\EitHost.App.exe
 ```
 
-Do not copy only the `.exe`. The application requires `HDF.PInvoke.dll`, `HDF.PInvoke.dll.config`, `hdf5.dll`, `hdf5_hl.dll`, and `USB2070.dll` beside it. Startup performs a real HDF5 create/write/close/delete probe before hardware can open. The repository does not include the USB2070 kernel-driver package.
+Do not run the application from inside the archive, and do not copy only the `.exe`. It requires `HDF.PInvoke.dll`, `HDF.PInvoke.dll.config`, `hdf5.dll`, `hdf5_hl.dll`, and `USB2070.dll` beside it. Startup performs a real HDF5 create/write/close/delete probe before hardware can open. The USB2070 kernel-driver package is not included.
 
-See [`release/EitHost-Windows-x64/README.md`](release/EitHost-Windows-x64/README.md) for package usage and SHA-256 verification instructions.
+Every archive carries a `SHA256SUMS.txt` covering each packaged file, and every release publishes the archive's own SHA-256. See [`release/EitHost-Windows-x64/README.md`](release/EitHost-Windows-x64/README.md) for package usage and verification instructions.
+
+The copy of `release/EitHost-Windows-x64` in this repository holds the package's supporting files and checksums but not the executable: the self-contained EXE exceeds GitHub's 100 MiB file limit, so it ships as a release asset, and a source build reproduces it.
 
 After completing project changes and relevant checks, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-eithost.ps1`. It rebuilds the current source into the single `release/EitHost-Windows-x64` installation while preserving `Data`. The version comes from the application project; dated release directories are no longer created by default. See the [project release policy](packaging/RELEASE-RULES.md).
 
