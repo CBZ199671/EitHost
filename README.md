@@ -27,7 +27,7 @@ EitHost is a Windows desktop application for multi-set Electrical Impedance Tomo
 - **Real-time acquisition and demodulation:** Acquisition, demodulation, diagnostics, reconstruction, and UI rendering run as decoupled pipeline stages so slower work does not unnecessarily disturb acquisition cadence.
 - **Traceable data lifecycle:** Raw data and derived results are stored in HDF5; experiments and processing state are managed by a SQLite catalog, with CSV export and database replay support.
 - **PyEIDORS integration layer:** EitHost includes a configurable persistent WSL2 worker bridge and manifest/profile routing. The compatible PyEIDORS v2 backend currently used by the laboratory has not yet been publicly released.
-- **Visualization and analysis:** Live boundary voltages, reconstruction images, fixed-ROI temporal analysis, and a display-only pseudo-3D view linearly interpolated along z from the imaging results of two independent 2D inverse problems.
+- **Visualization and analysis:** Live boundary voltages, reconstruction images, fixed-ROI temporal analysis, and a display-only pseudo-3D view built by quality-aware anisotropic universal kriging over two independent 2D inverse problems, reported together with a per-node relative variance.
 - **Field operations:** Device discovery, driver preflight, runtime logs, evidence export, and Chinese/English UI localization.
 - **Ready-to-run host package:** A self-contained Windows x64 build is published as a GitHub Release asset and does not require a separate .NET Runtime installation. Real-time reconstruction still requires a compatible PyEIDORS backend.
 
@@ -53,10 +53,13 @@ compared across an increasing concentration step.
 https://github.com/user-attachments/assets/3f3ab7dc-5a50-48eb-8475-d1362dc66486
 
 The recordings are also versioned under [`media/`](media/), which records the setup for
-each run. The pseudo-3D view interpolates linearly along z between two independent 2D
-inverse problems; it is a display-only view, not a true 3D inversion, and it carries the
-inter-layer time difference of the time-division schedule. Conductivity is shown as the
-change relative to each run's locked reference, not as a calibrated absolute reading.
+each run. The pseudo-3D view is produced by quality-aware anisotropic universal kriging
+across the two measured layers, weighted by each layer's quality and validated to keep
+the measured planes intact, and it reports a relative variance beside the values. It uses
+only the two independent 2D parameter fields: no cross-layer voltage is synthesised, and
+this is not a true 3D CEM inversion. The view also carries the inter-layer time difference
+of the time-division schedule. Conductivity is shown as the change relative to each run's
+locked reference, not as a calibrated absolute reading.
 
 The first recording is encoded with HEVC (H.265), which many browsers do not play; the
 copy under `media/` opens in a desktop player. The other two are H.264.

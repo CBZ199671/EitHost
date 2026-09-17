@@ -2,8 +2,10 @@
 
 Screen recordings of pseudo-3D conductivity imaging, captured from the workstation
 during paired time-division acquisition. Each recording shows the conductivity change
-reconstructed as the display-only pseudo-3D view: two independent 2D inverse problems
-interpolated linearly along z. It is not a true 3D inversion, and it carries the
+reconstructed as the display-only pseudo-3D view, which quality-aware anisotropic
+universal kriging builds across the two measured layers and reports together with a
+relative variance. It uses only the two independent 2D parameter fields: no cross-layer
+voltage is synthesised, and this is not a true 3D CEM inversion. It also carries the
 inter-layer time difference of the time-division schedule.
 
 All three runs start from a background solution at 11.4 µS/cm.
