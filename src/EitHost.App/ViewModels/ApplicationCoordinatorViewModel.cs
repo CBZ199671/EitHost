@@ -13,6 +13,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using EitHost.App;
+using EitHost.App.Localization;
 using EitHost.App.ViewModels.Workspaces;
 using EitHost.Core.Application.Realtime;
 using EitHost.Core.Acquisition;
@@ -2349,8 +2350,8 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
     private static bool ConfirmExperimentLifecycle(string title, string message)
     {
         return MessageBox.Show(
-                   message,
-                   title,
+                   UiLanguageContext.Localize(message),
+                   UiLanguageContext.Localize(title),
                    MessageBoxButton.YesNo,
                    MessageBoxImage.Warning,
                    MessageBoxResult.No) == MessageBoxResult.Yes;
@@ -3167,7 +3168,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
     {
         var dialog = new Microsoft.Win32.OpenFolderDialog
         {
-            Title = "选择 WSL2 中的 PyEIDORS 安装根目录（推荐 ~/apps/PyEIDORS）"
+            Title = UiLanguageContext.Localize("选择 WSL2 中的 PyEIDORS 安装根目录（推荐 ~/apps/PyEIDORS）")
         };
         var initialDirectory = realtimeBackend.InitialDirectory;
         if (!string.IsNullOrWhiteSpace(initialDirectory))
@@ -3197,7 +3198,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
     {
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
-            Filter = "HDF5 文件 (*.h5;*.hdf5)|*.h5;*.hdf5|所有文件 (*.*)|*.*",
+            Filter = UiLanguageContext.Localize("HDF5 文件 (*.h5;*.hdf5)|*.h5;*.hdf5|所有文件 (*.*)|*.*"),
             CheckFileExists = true,
         };
         ApplyDialogStartLocation(dialog, currentPath);
@@ -3208,7 +3209,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
     {
         var dialog = new Microsoft.Win32.SaveFileDialog
         {
-            Filter = filter,
+            Filter = UiLanguageContext.Localize(filter),
             DefaultExt = defaultExtension,
             OverwritePrompt = true,
         };

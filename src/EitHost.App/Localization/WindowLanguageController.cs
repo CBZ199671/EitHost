@@ -46,6 +46,7 @@ internal sealed class WindowLanguageController : IDisposable
         }
 
         CurrentLanguage = language;
+        UiLanguageContext.Set(language);
         ApplyAll();
     }
 

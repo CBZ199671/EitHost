@@ -1,4 +1,5 @@
 using System.IO;
+using EitHost.App.Localization;
 using EitHost.Core.Export;
 using EitHost.Core.Storage.Catalog;
 using EitHost.Core.Storage.Hdf5;
@@ -762,7 +763,7 @@ public sealed class ExperimentDataToolsViewModel : ObservableObject
     {
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
-            Filter = "HDF5 文件 (*.h5;*.hdf5)|*.h5;*.hdf5|所有文件 (*.*)|*.*",
+            Filter = UiLanguageContext.Localize("HDF5 文件 (*.h5;*.hdf5)|*.h5;*.hdf5|所有文件 (*.*)|*.*"),
             CheckFileExists = true,
         };
         ApplyDialogStartLocation(dialog, currentPath);
