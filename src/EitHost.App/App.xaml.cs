@@ -1,8 +1,9 @@
-﻿using System.Configuration;
+using System.Configuration;
 using System.Data;
 using System.IO;
 using System.Windows;
 using System.Windows.Threading;
+using EitHost.App.Localization;
 using EitHost.App.ViewModels;
 using EitHost.Core.Storage.Catalog;
 using EitHost.Core.Storage.Hdf5;
@@ -26,6 +27,10 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        // Resolve the language before anything can fail: the startup dialogs below run
+        // long before the main window exists, so they have no other source for it.
+        UiLanguageContext.Set(UiLanguagePreference.LoadOrSystemDefault());
+
         if (Hdf5SmokeTestCommand.TryRun(e.Args, out var smokeTestExitCode))
         {
             Shutdown(smokeTestExitCode);
@@ -39,8 +44,8 @@ public partial class App : Application
         catch (Exception exception)
         {
             MessageBox.Show(
-                $"无法初始化 Windows 应用身份，程序将退出。\n\n{exception.Message}",
-                "EIT 工作站启动失败",
+                UiLanguageContext.Localize($"无法初始化 Windows 应用身份，程序将退出。\n\n{exception.Message}"),
+                UiLanguageContext.Localize("EIT 工作站启动失败"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
             Shutdown(-1);
@@ -55,8 +60,8 @@ public partial class App : Application
             if (singleInstanceLease is null)
             {
                 MessageBox.Show(
-                    $"数据目录已有一个 EIT 工作站实例正在运行。\n\n{dataLayout.RootPath}",
-                    "EIT 工作站已在运行",
+                    UiLanguageContext.Localize($"数据目录已有一个 EIT 工作站实例正在运行。\n\n{dataLayout.RootPath}"),
+                    UiLanguageContext.Localize("EIT 工作站已在运行"),
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
                 Shutdown(-1);
@@ -66,8 +71,8 @@ public partial class App : Application
         catch (Exception exception)
         {
             MessageBox.Show(
-                $"无法锁定统一数据目录，程序将退出。\n\n{exception.Message}",
-                "EIT 工作站启动失败",
+                UiLanguageContext.Localize($"无法锁定统一数据目录，程序将退出。\n\n{exception.Message}"),
+                UiLanguageContext.Localize("EIT 工作站启动失败"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
             Shutdown(-1);
@@ -83,8 +88,8 @@ public partial class App : Application
             singleInstanceLease.Dispose();
             singleInstanceLease = null;
             MessageBox.Show(
-                $"HDF5 存储运行库不可用，程序将退出。请重新解压完整发布包，确认 HDF.PInvoke.dll、hdf5.dll 和 hdf5_hl.dll 与主程序位于同一目录。\n\n{exception.Message}",
-                "EIT 工作站启动失败",
+                UiLanguageContext.Localize($"HDF5 存储运行库不可用，程序将退出。请重新解压完整发布包，确认 HDF.PInvoke.dll、hdf5.dll 和 hdf5_hl.dll 与主程序位于同一目录。\n\n{exception.Message}"),
+                UiLanguageContext.Localize("EIT 工作站启动失败"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
             Shutdown(-1);
@@ -115,8 +120,8 @@ public partial class App : Application
             singleInstanceLease?.Dispose();
             singleInstanceLease = null;
             MessageBox.Show(
-                $"无法创建工作站主窗口，程序将退出。\n\n{exception.Message}",
-                "EIT 工作站启动失败",
+                UiLanguageContext.Localize($"无法创建工作站主窗口，程序将退出。\n\n{exception.Message}"),
+                UiLanguageContext.Localize("EIT 工作站启动失败"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
             Shutdown(-1);
@@ -152,8 +157,8 @@ public partial class App : Application
         try
         {
             MessageBox.Show(
-                $"工作站拦截到未处理异常，本次操作可能未完成。请先停止实验并核查当前数据。\n\n{e.Exception.Message}",
-                "EIT 工作站运行异常",
+                UiLanguageContext.Localize($"工作站拦截到未处理异常，本次操作可能未完成。请先停止实验并核查当前数据。\n\n{e.Exception.Message}"),
+                UiLanguageContext.Localize("EIT 工作站运行异常"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
         }

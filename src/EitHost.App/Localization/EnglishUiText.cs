@@ -11,6 +11,11 @@ internal static partial class EnglishUiText
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["EIT 工作站"] = "EIT Workstation",
+            // Native dialog titles: phrase-by-phrase substitution would glue "EIT Workstation"
+            // to the following phrase, because the Chinese has no separator between them.
+            ["EIT 工作站启动失败"] = "EIT Workstation failed to start",
+            ["EIT 工作站已在运行"] = "EIT Workstation is already running",
+            ["EIT 工作站运行异常"] = "EIT Workstation runtime error",
             ["同组双设备 · 选择下层或上层均可回放整组；单设备检查与导出跟随所选层。"] = "Paired devices: select either layer to replay the group. Inspection and export use the selected device.",
             ["伪三维 · 双设备采集回放"] = "Pseudo-3D · Paired Acquisition Replay",
             ["按同一采集轮次同步查看双层原始电压、二维重构及保存的三维结果。空白表示本轮未生成该结果。"] = "View both layers' acquired voltages, 2D images and saved 3D results at the same acquisition round. Blank panels indicate unavailable results.",
@@ -1928,6 +1933,10 @@ internal static partial class EnglishUiText
             translated = translated.Replace(chinese, english, StringComparison.Ordinal);
         }
 
+        // A full stop followed by more text needs the sentence space that the other
+        // punctuation replacements already carry; one at the end of a line or before an
+        // opening bracket must not gain a stray space.
+        translated = SentenceBreakRegex().Replace(translated, ". ");
         translated = translated
             .Replace("，", ", ", StringComparison.Ordinal)
             .Replace("、", ", ", StringComparison.Ordinal)
@@ -1953,6 +1962,9 @@ internal static partial class EnglishUiText
 
     [GeneratedRegex("[\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uF900-\\uFAFF]+", RegexOptions.CultureInvariant)]
     private static partial Regex ChineseRunRegex();
+
+    [GeneratedRegex("。(?=[^\\s（])", RegexOptions.CultureInvariant)]
+    private static partial Regex SentenceBreakRegex();
 
     [GeneratedRegex("已绑定\\s*(?<count>\\d+)\\s*套(?!硬件)", RegexOptions.CultureInvariant)]
     private static partial Regex BoundSetCountRegex();

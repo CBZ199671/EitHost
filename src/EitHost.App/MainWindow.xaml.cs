@@ -61,7 +61,9 @@ public partial class MainWindow : Window
         this.viewModel = viewModel;
         DataContext = viewModel;
         languageController = new WindowLanguageController(this);
-        UpdateLanguageMenuSelection();
+        // App.OnStartup already resolved the stored choice or the system default; adopt it
+        // without writing it back, so the file records only what the user picked.
+        SetUiLanguage(UiLanguageContext.Current, persist: false);
         ShowPage(NavRealtime);
         ShellRoot.SizeChanged += ShellRoot_SizeChanged;
         ApplyLayoutDensity(new Size(ShellRoot.ActualWidth, ShellRoot.ActualHeight));
@@ -376,16 +378,29 @@ public partial class MainWindow : Window
 
     internal void SetUiLanguage(UiLanguage language)
     {
+        SetUiLanguage(language, persist: false);
+    }
+
+    private void SetUiLanguage(UiLanguage language, bool persist)
+    {
         languageController.SetLanguage(language);
         Language = XmlLanguage.GetLanguage(languageController.CurrentCulture.IetfLanguageTag);
         UpdateLanguageMenuSelection();
+        if (persist)
+        {
+            // A preference that cannot be written must not interrupt the session; the
+            // selection still applies until the workstation is restarted.
+            UiLanguagePreference.Save(language);
+        }
     }
 
     private void LanguageMenuItem_Click(object sender, RoutedEventArgs e)
     {
-        SetUiLanguage(ReferenceEquals(sender, EnglishMenuItem)
-            ? UiLanguage.English
-            : UiLanguage.SimplifiedChinese);
+        SetUiLanguage(
+            ReferenceEquals(sender, EnglishMenuItem)
+                ? UiLanguage.English
+                : UiLanguage.SimplifiedChinese,
+            persist: true);
         e.Handled = true;
     }
 
