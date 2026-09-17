@@ -1,0 +1,9 @@
+# Git must not rewrite line endings anywhere in this repository.
+#
+# scripts/package-eithost.ps1 copies LICENSE, THIRD_PARTY_NOTICES.md and
+# packaging/README.zh-CN.md into the delivery directory verbatim and records
+# SHA256SUMS.txt over the resulting bytes. With end-of-line conversion enabled,
+# a clone materialises different bytes than the ones those checksums were
+# computed from, so the published package fails its own verification and
+# unmodified files report as changed.
+* -text
