@@ -27,7 +27,7 @@ EitHost 是面向多套电阻抗成像（EIT）设备的 Windows 桌面上位机
 - **实时采集与解调：** 采集、解调、诊断、重构和界面渲染采用解耦流水线，降低慢任务对采集节拍的影响。
 - **数据可追溯：** 原始数据和派生结果使用 HDF5，实验目录与处理状态使用 SQLite catalog 管理，并支持 CSV 导出与数据库回放。
 - **PyEIDORS 集成层：** EitHost 包含可配置的 WSL2 持久 worker 桥接与 manifest/profile 路由；实验室当前使用的兼容 PyEIDORS v2 后端尚未公开。
-- **可视化与分析：** 支持实时边界电压、重构图像、固定 ROI 时序分析，以及由两层独立二维重构插值得到的显示型 2.5D 视图。
+- **可视化与分析：** 支持实时边界电压、重构图像、固定 ROI 时序分析，以及由两个独立二维逆问题的成像结果沿 z 方向线性插值得到的伪三维视图。
 - **现场运维：** 提供设备扫描、驱动预检、运行日志、证据导出和中英文界面。
 - **上位机开箱运行：** 仓库包含 Windows x64 自包含发布版，无需另行安装 .NET Runtime；实时重构仍需兼容的 PyEIDORS 后端。
 
@@ -41,7 +41,7 @@ flowchart LR
     C --> DB[(SQLite catalog)]
     C --> B[WSL2 backend bridge]
     B --> P[兼容的 PyEIDORS 后端]
-    P --> V[2D / display-only 2.5D visualization]
+    P --> V[二维 / 伪三维插值显示]
 ```
 
 EitHost 负责 Windows 侧硬件、实验流程与数据生命周期；兼容的 PyEIDORS 后端负责有限元正问题和逆问题求解。两者通过明确的后端配置与数据协议连接，便于独立演进。
@@ -76,6 +76,8 @@ PyEIDORS v2 是下一代重大版本，包含大量新增能力、架构改进�
 不要只复制单个 `.exe`。程序需要同目录中的 `HDF.PInvoke.dll`、`HDF.PInvoke.dll.config`、`hdf5.dll`、`hdf5_hl.dll` 和 `USB2070.dll`。启动时会在打开硬件前真实执行一次 HDF5 创建、写入、关闭和删除探针。仓库不包含 USB2070 内核驱动安装包。
 
 发布文件的使用方法与 SHA-256 校验说明见 [`release/EitHost-Windows-x64/README.md`](release/EitHost-Windows-x64/README.md)。
+
+**本项目统一发布规则：** 每次完成修改并通过相关验证后，运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-eithost.ps1`，更新唯一运行目录 `release/EitHost-Windows-x64` 并保留现有 `Data`。版本从项目文件读取，不再自动生成分散的日期/版本目录。详见 [发布规则](packaging/RELEASE-RULES.md)。
 
 ### 从源码构建
 

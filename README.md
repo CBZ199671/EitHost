@@ -27,7 +27,7 @@ EitHost is a Windows desktop application for multi-set Electrical Impedance Tomo
 - **Real-time acquisition and demodulation:** Acquisition, demodulation, diagnostics, reconstruction, and UI rendering run as decoupled pipeline stages so slower work does not unnecessarily disturb acquisition cadence.
 - **Traceable data lifecycle:** Raw data and derived results are stored in HDF5; experiments and processing state are managed by a SQLite catalog, with CSV export and database replay support.
 - **PyEIDORS integration layer:** EitHost includes a configurable persistent WSL2 worker bridge and manifest/profile routing. The compatible PyEIDORS v2 backend currently used by the laboratory has not yet been publicly released.
-- **Visualization and analysis:** Live boundary voltages, reconstruction images, fixed-ROI temporal analysis, and a display-only 2.5D view interpolated from two independently reconstructed 2D layers.
+- **Visualization and analysis:** Live boundary voltages, reconstruction images, fixed-ROI temporal analysis, and a display-only pseudo-3D view linearly interpolated along z from the imaging results of two independent 2D inverse problems.
 - **Field operations:** Device discovery, driver preflight, runtime logs, evidence export, and Chinese/English UI localization.
 - **Ready-to-run host package:** A self-contained Windows x64 build is included and does not require a separate .NET Runtime installation. Real-time reconstruction still requires a compatible PyEIDORS backend.
 
@@ -41,7 +41,7 @@ flowchart LR
     C --> DB[(SQLite catalog)]
     C --> B[WSL2 backend bridge]
     B --> P[Compatible PyEIDORS backend]
-    P --> V[2D / display-only 2.5D visualization]
+    P --> V[2D / display-only pseudo-3D visualization]
 ```
 
 EitHost owns the Windows-side hardware, experiment workflow, and data lifecycle. A compatible PyEIDORS backend owns finite-element forward and inverse solving. A defined backend configuration and data protocol keep both projects independently evolvable.
@@ -76,6 +76,8 @@ While the associated research manuscript is being prepared, the PyEIDORS v2 sour
 Do not copy only the `.exe`. The application requires `HDF.PInvoke.dll`, `HDF.PInvoke.dll.config`, `hdf5.dll`, `hdf5_hl.dll`, and `USB2070.dll` beside it. Startup performs a real HDF5 create/write/close/delete probe before hardware can open. The repository does not include the USB2070 kernel-driver package.
 
 See [`release/EitHost-Windows-x64/README.md`](release/EitHost-Windows-x64/README.md) for package usage and SHA-256 verification instructions.
+
+After completing project changes and relevant checks, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-eithost.ps1`. It rebuilds the current source into the single `release/EitHost-Windows-x64` installation while preserving `Data`. The version comes from the application project; dated release directories are no longer created by default. See the [project release policy](packaging/RELEASE-RULES.md).
 
 ### Build from source
 
