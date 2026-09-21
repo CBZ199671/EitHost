@@ -4,7 +4,6 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
-using System.Windows.Markup;
 using EitHost.App.Localization;
 using EitHost.App.ViewModels;
 
@@ -384,7 +383,6 @@ public partial class MainWindow : Window
     private void SetUiLanguage(UiLanguage language, bool persist)
     {
         languageController.SetLanguage(language);
-        Language = XmlLanguage.GetLanguage(languageController.CurrentCulture.IetfLanguageTag);
         UpdateLanguageMenuSelection();
         if (persist)
         {

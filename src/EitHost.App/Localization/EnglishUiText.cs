@@ -10,6 +10,9 @@ internal static partial class EnglishUiText
     private static readonly FrozenDictionary<string, string> Exact =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
+            ["打开日历"] = "Open calendar",
+            ["上一个"] = "Previous",
+            ["下一个"] = "Next",
             ["双层采集"] = "Paired acquisition",
             ["选择任一层，查看双层已保存图像。"] = "Select either layer to view the saved images of both layers.",
             ["请先选择"] = "Please select first",
