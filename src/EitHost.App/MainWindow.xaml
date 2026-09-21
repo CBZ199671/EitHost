@@ -5,6 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         xmlns:views="clr-namespace:EitHost.App.Views"
+        xmlns:local="clr-namespace:EitHost.App"
         mc:Ignorable="d"
         Title="{Binding ApplicationTitle}"
         MinHeight="640"
@@ -18,6 +19,20 @@
         UseLayoutRounding="True"
         WindowStyle="None"
         ResizeMode="CanResizeWithGrip">
+    <Window.Resources>
+        <local:OperatorMessageConverter x:Key="OperatorMessage" />
+        <Style x:Key="ReadablePlotAxis" TargetType="ItemsControl">
+            <Setter Property="Width" Value="80" />
+            <Setter Property="ItemsPanel"><Setter.Value><ItemsPanelTemplate><views:PlotTickPanel /></ItemsPanelTemplate></Setter.Value></Setter>
+            <Setter Property="ItemContainerStyle"><Setter.Value><Style TargetType="ContentPresenter">
+                <Setter Property="views:PlotTickPanel.Coordinate" Value="{Binding Top}" />
+            </Style></Setter.Value></Setter>
+            <Setter Property="ItemTemplate"><Setter.Value><DataTemplate>
+                <TextBlock Text="{Binding Label}" FontFamily="Times New Roman" FontSize="14" Height="18"
+                           TextAlignment="Right" Margin="0,0,6,0" Foreground="{StaticResource Text1Brush}" />
+            </DataTemplate></Setter.Value></Setter>
+        </Style>
+    </Window.Resources>
     <shell:WindowChrome.WindowChrome>
         <shell:WindowChrome CaptionHeight="0"
                             ResizeBorderThickness="6"
@@ -53,7 +68,7 @@
                 <Menu Grid.Column="1" Background="Transparent" BorderThickness="0"
                       VerticalAlignment="Center" Margin="20,0,0,0" FontSize="12">
                     <MenuItem x:Name="FileMenuItem" Header="文件(F)">
-                        <MenuItem Header="刷新 catalog" Command="{Binding RefreshCatalogRunsCommand}" />
+                        <MenuItem Header="刷新实验记录" Command="{Binding RefreshCatalogRunsCommand}" />
                         <MenuItem Header="导出现场快照" Command="{Binding ExportFieldSnapshotCommand}" />
                         <Separator />
                         <MenuItem Header="退出" Click="CloseButton_Click" />
@@ -329,7 +344,7 @@
                                     <TextBlock Text="{Binding DataRootPath}" Style="{StaticResource MonoText}" />
                                     <TextBlock Text="Catalog 路径" Style="{StaticResource FieldLabel}" Margin="0,12,0,4" />
                                     <TextBlock Text="{Binding CatalogPath}" Style="{StaticResource MonoText}" />
-                                    <Button Content="刷新 catalog" Command="{Binding RefreshCatalogRunsCommand}"
+                                    <Button Content="刷新实验记录" Command="{Binding RefreshCatalogRunsCommand}"
                                             Style="{StaticResource SubtleButton}" Height="32" HorizontalAlignment="Left"
                                             Margin="0,14,0,0" />
                                 </StackPanel>
@@ -981,7 +996,10 @@
                                                                 Style="{StaticResource PrimaryButton}" VerticalAlignment="Bottom" />
                                                     </Grid>
 
-                                                    <TextBlock Text="{Binding RealtimeReferenceSummary}" Style="{StaticResource HintText}"
+                                                    <TextBlock Text="{Binding RealtimeRawWaveStats}" TextWrapping="Wrap" />
+<TextBlock Text="{Binding RealtimeDemodStats}" TextWrapping="Wrap" />
+<TextBlock Text="{Binding RealtimeBoundaryStats}" TextWrapping="Wrap" />
+<TextBlock Text="{Binding RealtimeReferenceSummary}" Style="{StaticResource HintText}"
                                                                Margin="0,12,0,0" />
                                                 </StackPanel>
                                             </Border>
@@ -1321,7 +1339,7 @@
                                                                         IsEnabled="{Binding CanEditRealtimeBackendSettings}"
                                                                         ToolTip="选择 WSL2 中的 PyEIDORS 安装根目录（推荐 ~/apps/PyEIDORS）" />
                                                             </Grid>
-                                                            <TextBlock Text="{Binding RealtimeBackendStatus}"
+                                                            <TextBlock Text="{Binding RealtimeBackendStatus, Converter={StaticResource OperatorMessage}}"
                                                                        Style="{StaticResource HintText}"
                                                                        Margin="0,4,0,0"
                                                                        TextWrapping="Wrap" />
@@ -1586,13 +1604,11 @@
                                           VerticalAlignment="Center" Margin="0,0,12,0" />
                                 <CheckBox Content="设备设置" IsChecked="{Binding ShowRealtimeSettings}" Margin="0,0,10,0" VerticalAlignment="Center" />
                                 <CheckBox Content="辅助曲线" IsChecked="{Binding ShowRealtimeAuxiliary}" Margin="0,0,10,0" VerticalAlignment="Center" />
-                                <CheckBox Content="帧与日志" IsChecked="{Binding ShowRealtimeHistory}" Margin="0,0,10,0" VerticalAlignment="Center" />
-                                <CheckBox Content="诊断详情" IsChecked="{Binding ShowRealtimeDiagnostics}" Margin="0,0,10,0" VerticalAlignment="Center" />
-                                <TextBlock Text="{Binding RealtimeImagingSummary}"
-                                           ToolTip="{Binding RealtimeImagingSummary}"
-                                           Style="{StaticResource PlotStatsText}"
-                                           VerticalAlignment="Center" Margin="0" />
+                                <CheckBox Content="参考与曲线" IsChecked="{Binding ShowRealtimeHistory}" Margin="0,0,10,0" VerticalAlignment="Center" />
+                                <Button Content="系统日志" Click="ShowLogMenu_Click" Margin="0,0,10,0" Padding="8,0" Height="24" MinHeight="0" />
+                                <TextBlock x:Name="RealtimeOperatorContact" Text="{Binding RealtimeContactSummary, Converter={StaticResource OperatorMessage}, ConverterParameter=Contact}" Style="{StaticResource PlotStatsText}" TextWrapping="Wrap" VerticalAlignment="Center" />
                             </WrapPanel>
+
                             <!-- Pseudo-3d parameters and provenance only matter once the mode is
                                  armed, so they fold away and leave the height to the plots. The
                                  伪三维 switch itself sits on the row above, always reachable. -->
@@ -1687,14 +1703,11 @@
                                     </TextBox>
                                 </StackPanel>
                             </WrapPanel>
-                            <TextBlock Text="{Binding RealtimePseudo3dStatus}"
-                                       ToolTip="{Binding RealtimePseudo3dStatus}"
+                            <TextBlock Text="{Binding RealtimePseudo3dStatus, Converter={StaticResource OperatorMessage}}"
+                                       ToolTip="{Binding RealtimePseudo3dStatus, Converter={StaticResource OperatorMessage}}"
                                        Style="{StaticResource MonoText}" FontSize="10" Margin="0,2,0,0"
                                        TextWrapping="Wrap" TextTrimming="CharacterEllipsis" />
-                            <TextBlock Text="{Binding RealtimePseudo3dProvenance}"
-                                       ToolTip="{Binding RealtimePseudo3dProvenance}"
-                                       Style="{StaticResource HintText}" FontSize="10" Margin="0,2,0,0"
-                                       TextWrapping="Wrap" TextTrimming="CharacterEllipsis" />
+
                             </StackPanel>
                             </Expander>
                             </StackPanel>
@@ -1719,22 +1732,18 @@
                                             <TextBlock Text="原始边界电压 CH1" ToolTip="原始边界电压 CH1" Style="{StaticResource H3Text}"
                                                        VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                                         </Grid>
-                                        <TextBlock Text="{Binding RealtimeRawWaveStats}"
-                                                   ToolTip="{Binding RealtimeRawWaveStats}"
-                                                   Style="{StaticResource PlotStatsText}" />
+
                                     </StackPanel>
                                     <Border x:Name="RealtimeRawPlotSurface" Style="{StaticResource PlotSurface}">
-                                        <Viewbox Stretch="Fill">
-                                            <Canvas Width="520" Height="220">
-                                                <Line X1="0" X2="520" Y1="55" Y2="55" Stroke="{StaticResource DividerBrush}" />
-                                                <Line X1="0" X2="520" Y1="110" Y2="110" Stroke="{StaticResource DividerBrush}" />
-                                                <Line X1="0" X2="520" Y1="165" Y2="165" Stroke="{StaticResource DividerBrush}" />
-                                                <Path Data="{Binding RealtimeRawChannel1Geometry}"
-                                                      Stroke="#0b78c8" StrokeThickness="2.4"
-                                                      StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
-                                            </Canvas>
-                                        </Viewbox>
-                                    </Border>
+    <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="80" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+        <ItemsControl x:Name="RealtimeRawYAxisTicksControl" ItemsSource="{Binding VisualizationWorkspace.RealtimeRawYAxisTicks}" Style="{StaticResource ReadablePlotAxis}" />
+        <Grid Grid.Column="1">
+            <views:PlotTrace Data="M14,55 L506,55 M14,110 L506,110 M14,165 L506,165" Stroke="{StaticResource DividerBrush}" StrokeThickness="1" />
+            <views:PlotTrace x:Name="RealtimeRawTrace" Data="{Binding RealtimeRawChannel1Geometry}" Stroke="#0b78c8" StrokeThickness="2.4" />
+        </Grid>
+    </Grid>
+</Border>
                                 </DockPanel>
                             </Border>
 
@@ -1747,65 +1756,23 @@
                                                        Style="{StaticResource H3Text}" VerticalAlignment="Center"
                                                        TextTrimming="CharacterEllipsis" />
                                         </Grid>
-                                        <TextBlock Text="{Binding RealtimeDemodStats}"
-                                                   ToolTip="{Binding RealtimeDemodStats}"
-                                                   Style="{StaticResource PlotStatsText}" />
+
                                         <TextBlock Text="{Binding RealtimeDemodLegend}"
                                                    ToolTip="{Binding RealtimeDemodLegend}"
                                                    Style="{StaticResource PlotSecondaryText}" />
                                     </StackPanel>
                                     <Border x:Name="RealtimeDemodPlotSurface" Style="{StaticResource PlotSurface}">
-                                        <Viewbox Stretch="Fill">
-                                            <Grid Width="594" Height="220">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="68" />
-                                                    <ColumnDefinition Width="6" />
-                                                    <ColumnDefinition Width="520" />
-                                                </Grid.ColumnDefinitions>
-                                                <ItemsControl x:Name="RealtimeDemodYAxisTicksControl"
-                                                              Grid.Column="0" Width="68" Height="220"
-                                                              ItemsSource="{Binding RealtimeDemodYAxisTicks}">
-                                                    <ItemsControl.ItemsPanel>
-                                                        <ItemsPanelTemplate><Canvas Width="68" Height="220" /></ItemsPanelTemplate>
-                                                    </ItemsControl.ItemsPanel>
-                                                    <ItemsControl.ItemContainerStyle>
-                                                        <Style TargetType="ContentPresenter">
-                                                            <Setter Property="Canvas.Top" Value="{Binding LabelTop}" />
-                                                        </Style>
-                                                    </ItemsControl.ItemContainerStyle>
-                                                    <ItemsControl.ItemTemplate>
-                                                        <DataTemplate>
-                                                            <TextBlock Text="{Binding Label}" Width="68" TextAlignment="Right">
-                                                                <TextBlock.Style>
-                                                                    <Style TargetType="TextBlock" BasedOn="{StaticResource MonoText}">
-                                                                        <Setter Property="FontSize" Value="10" />
-                                                                        <Style.Triggers>
-                                                                            <DataTrigger Binding="{Binding IsZero}" Value="True">
-                                                                                <Setter Property="FontWeight" Value="SemiBold" />
-                                                                                <Setter Property="Foreground" Value="{StaticResource Text1Brush}" />
-                                                                            </DataTrigger>
-                                                                        </Style.Triggers>
-                                                                    </Style>
-                                                                </TextBlock.Style>
-                                                            </TextBlock>
-                                                        </DataTemplate>
-                                                    </ItemsControl.ItemTemplate>
-                                                </ItemsControl>
-                                                <Canvas x:Name="RealtimeDemodPlotCanvas" Grid.Column="2" Width="520" Height="220">
-                                                    <Path Data="{Binding RealtimeDemodGridGeometry}"
-                                                          Stroke="{StaticResource DividerBrush}" StrokeThickness="1" />
-                                                    <Path Data="{Binding RealtimeDemodZeroLineGeometry}"
-                                                          Stroke="#64748b" StrokeThickness="1.8" />
-                                                    <Path Data="{Binding RealtimeDemodPrimaryGeometry}"
-                                                          Stroke="#0b78c8" StrokeThickness="2.4"
-                                                          StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
-                                                    <Path Data="{Binding RealtimeDemodSecondaryGeometry}"
-                                                          Stroke="#c7352b" StrokeThickness="2.0" Opacity="0.85"
-                                                          StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
-                                                </Canvas>
-                                            </Grid>
-                                        </Viewbox>
-                                    </Border>
+    <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="80" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+        <ItemsControl x:Name="RealtimeDemodYAxisTicksControl" ItemsSource="{Binding RealtimeDemodYAxisTicks}" Style="{StaticResource ReadablePlotAxis}" />
+        <Grid x:Name="RealtimeDemodPlotCanvas" Grid.Column="1">
+            <views:PlotTrace Data="{Binding RealtimeDemodGridGeometry}" Stroke="{StaticResource DividerBrush}" StrokeThickness="1" />
+            <views:PlotTrace Data="{Binding RealtimeDemodZeroLineGeometry}" Stroke="#64748b" StrokeThickness="1.4" />
+            <views:PlotTrace x:Name="RealtimeDemodPrimaryTrace" Data="{Binding RealtimeDemodPrimaryGeometry}" Stroke="#0b78c8" StrokeThickness="2.4" />
+            <views:PlotTrace Data="{Binding RealtimeDemodSecondaryGeometry}" Stroke="#c7352b" StrokeThickness="2.2" Opacity="0.85" />
+        </Grid>
+    </Grid>
+</Border>
                                 </DockPanel>
                             </Border>
 
@@ -1816,45 +1783,27 @@
                                             <TextBlock Text="边界电压拟合" ToolTip="边界电压拟合" Style="{StaticResource H3Text}"
                                                        VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                                         </Grid>
-                                        <TextBlock Text="{Binding RealtimeBoundaryStats}"
-                                                   ToolTip="{Binding RealtimeBoundaryStats}"
-                                                   Style="{StaticResource PlotStatsText}" />
+
                                     </StackPanel>
                                     <Border x:Name="RealtimeBoundaryPlotSurface" Style="{StaticResource PlotSurface}">
-                                        <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="48" />
-                                                <ColumnDefinition Width="*" />
-                                            </Grid.ColumnDefinitions>
-                                            <Grid Grid.Column="0" Height="220" Margin="0,0,6,0">
-                                                <TextBlock Text="{Binding RealtimeBoundaryYAxisTop}"
-                                                           Style="{StaticResource MonoText}" FontSize="10"
-                                                           HorizontalAlignment="Right" VerticalAlignment="Top" />
-                                                <TextBlock Text="{Binding RealtimeBoundaryYAxisMiddle}"
-                                                           Style="{StaticResource MonoText}" FontSize="10"
-                                                           HorizontalAlignment="Right" VerticalAlignment="Center" />
-                                                <TextBlock Text="{Binding RealtimeBoundaryYAxisBottom}"
-                                                           Style="{StaticResource MonoText}" FontSize="10"
-                                                           HorizontalAlignment="Right" VerticalAlignment="Bottom" />
-                                            </Grid>
-                                            <Viewbox Grid.Column="1" Stretch="Fill">
-                                                <Canvas Width="520" Height="220">
-                                                    <Line X1="0" X2="520" Y1="55" Y2="55" Stroke="{StaticResource DividerBrush}" />
-                                                    <Line X1="0" X2="520" Y1="110" Y2="110" Stroke="{StaticResource DividerBrush}" />
-                                                    <Line X1="0" X2="520" Y1="165" Y2="165" Stroke="{StaticResource DividerBrush}" />
-                                                    <Path Data="{Binding RealtimeBoundaryReferenceGeometry}"
-                                                          Stroke="#c7352b" StrokeThickness="2.0" StrokeDashArray="5,4" Opacity="0.85"
-                                                          StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
-                                                    <Path Data="{Binding RealtimeBoundaryTemplateGeometry}"
-                                                          Stroke="#16a34a" StrokeThickness="2.0" StrokeDashArray="2,5" Opacity="0.9"
-                                                          StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
-                                                    <Path Data="{Binding RealtimeBoundaryTargetGeometry}"
-                                                          Stroke="#0b78c8" StrokeThickness="2.4"
-                                                          StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
-                                                </Canvas>
-                                            </Viewbox>
-                                        </Grid>
-                                    </Border>
+    <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="80" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+        <views:PlotTickPanel x:Name="RealtimeBoundaryYAxisTicksControl" Width="80">
+            <TextBlock Text="{Binding RealtimeBoundaryYAxisTop}" views:PlotTickPanel.Coordinate="14"
+                       FontFamily="Times New Roman" FontSize="14" Height="18" TextAlignment="Right" Margin="0,0,6,0" />
+            <TextBlock Text="{Binding RealtimeBoundaryYAxisMiddle}" views:PlotTickPanel.Coordinate="110"
+                       FontFamily="Times New Roman" FontSize="14" Height="18" TextAlignment="Right" Margin="0,0,6,0" />
+            <TextBlock Text="{Binding RealtimeBoundaryYAxisBottom}" views:PlotTickPanel.Coordinate="206"
+                       FontFamily="Times New Roman" FontSize="14" Height="18" TextAlignment="Right" Margin="0,0,6,0" />
+        </views:PlotTickPanel>
+        <Grid Grid.Column="1">
+            <views:PlotTrace Data="M14,55 L506,55 M14,110 L506,110 M14,165 L506,165" Stroke="{StaticResource DividerBrush}" StrokeThickness="1" />
+            <views:PlotTrace Data="{Binding RealtimeBoundaryReferenceGeometry}" Stroke="#c7352b" StrokeThickness="2.2" IsDashed="True" Opacity="0.85" />
+            <views:PlotTrace Data="{Binding RealtimeBoundaryTemplateGeometry}" Stroke="#16a34a" StrokeThickness="2.2" IsDashed="True" Opacity="0.9" />
+            <views:PlotTrace x:Name="RealtimeBoundaryTargetTrace" Data="{Binding RealtimeBoundaryTargetGeometry}" Stroke="#0b78c8" StrokeThickness="2.4" />
+        </Grid>
+    </Grid>
+</Border>
                                 </DockPanel>
                             </Border>
 
@@ -1872,7 +1821,7 @@
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="10" />
-                                            <ColumnDefinition Width="{Binding RealtimeDiagnosticsWidth}" />
+                                            <ColumnDefinition Width="0" />
                                         </Grid.ColumnDefinitions>
                                         <Border Grid.Column="0"
                                                 Background="{StaticResource SunkenBrush}"
@@ -2007,52 +1956,13 @@
                                                     <TextBlock Text="{Binding RealtimePseudo3dColorScale}" FontFamily="Times New Roman" FontSize="12" TextAlignment="Center" TextWrapping="Wrap" />
                                                 </StackPanel>
                                                 <Border Visibility="{Binding RealtimePseudo3dWarningVisibility}" Background="#B8000000" Padding="16">
-                                                    <TextBlock Text="{Binding RealtimePseudo3dWarning}" Foreground="White" FontSize="21" TextWrapping="Wrap" TextAlignment="Center" VerticalAlignment="Center" />
+                                                    <TextBlock Text="{Binding RealtimePseudo3dWarning, Converter={StaticResource OperatorMessage}}" Foreground="White" FontSize="21" TextWrapping="Wrap" TextAlignment="Center" VerticalAlignment="Center" />
                                                 </Border>
                                             </Grid>
                                             </Grid>
                                             </Viewbox>
                                         </Border>
-                                        <ScrollViewer x:Name="RealtimeReconstructionDiagnostics" Visibility="{Binding RealtimeDiagnosticsVisibility}" ClipToBounds="True"
-                                                      Grid.Column="2"
-                                                      VerticalScrollBarVisibility="Auto"
-                                                      HorizontalScrollBarVisibility="Disabled">
-                                            <StackPanel>
-                                                <TextBlock Text="{Binding RealtimeReconstructionActivity}"
-                                                           ToolTip="{Binding RealtimeReconstructionActivity}"
-                                                           Style="{StaticResource MonoText}" FontSize="11"
-                                                           Foreground="#0b78c8"
-                                                           TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
-                                                           LineHeight="15" LineStackingStrategy="BlockLineHeight"
-                                                           Height="60" />
-                                                <TextBlock Text="{Binding RealtimeImageStats}"
-                                                           ToolTip="{Binding RealtimeImageStats}"
-                                                           Style="{StaticResource MonoText}" FontSize="11" Margin="0,4,0,0"
-                                                           TextWrapping="Wrap" />
-                                                <TextBlock Text="{Binding RealtimeBaselineIntegritySummary}"
-                                                           ToolTip="{Binding RealtimeBaselineIntegritySummary}"
-                                                           Style="{StaticResource MonoText}" FontSize="11" Margin="0,6,0,0"
-                                                           TextWrapping="Wrap" />
-                                                <TextBlock Text="{Binding RealtimeContactSummary}"
-                                                           ToolTip="{Binding RealtimeContactSummary}"
-                                                           Style="{StaticResource MonoText}" FontSize="11" Margin="0,6,0,0"
-                                                           TextWrapping="Wrap" />
-                                                <TextBlock Text="{Binding RealtimeMultiFrequencySummary}"
-                                                           ToolTip="{Binding RealtimeMultiFrequencySummary}"
-                                                           Style="{StaticResource MonoText}" FontSize="11" Margin="0,6,0,0"
-                                                           TextWrapping="Wrap" />
-                                                <Border Background="{StaticResource SunkenBrush}"
-                                                        BorderBrush="{StaticResource DividerBrush}"
-                                                        BorderThickness="1" CornerRadius="6" Padding="7,6" Margin="0,8,0,0">
-                                                    <StackPanel>
-                                                        <TextBlock Text="{Binding RealtimeDataQualityStatus}" Style="{StaticResource MonoText}" FontSize="10" TextWrapping="Wrap" />
-                                                        <TextBlock Text="{Binding RealtimeReferenceModeStatus}" Style="{StaticResource MonoText}" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap" />
-                                                        <TextBlock Text="{Binding RealtimeReconstructionQualityStatus}" Style="{StaticResource MonoText}" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap" />
-                                                        <TextBlock Text="{Binding RealtimeRoiReadinessStatus}" Style="{StaticResource MonoText}" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap" />
-                                                    </StackPanel>
-                                                </Border>
-                                            </StackPanel>
-                                        </ScrollViewer>
+
                                     </Grid>
                                 </DockPanel>
                             </Border>
@@ -2072,8 +1982,8 @@
                             <Border Grid.Row="0" Padding="16,10,16,8"
                                     BorderBrush="{StaticResource DividerBrush}" BorderThickness="0,0,0,1">
                                 <StackPanel>
-                                    <TextBlock Text="已录制的帧" Style="{StaticResource H3Text}" />
-                                    <TextBlock Text="自动稳定锁定；100 个高质量帧后可由用户建立正常参考。"
+                                    <TextBlock Text="参考与曲线" Style="{StaticResource H3Text}" />
+                                    <TextBlock Text="先建立参考，再观察图像和曲线。"
                                                ToolTip="慢变样本无需等待稳定阈值；用户参考不会被标为低置信，也不会禁止 ROI。"
                                                Style="{StaticResource HintText}" Margin="0,3,0,0"
                                                TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
@@ -2275,7 +2185,7 @@
                                     <TextBlock Text="{Binding RealtimeFixedRoiTemporal.MetricsSummary}"
                                                Visibility="{Binding RoiFixedGridVisibility}"
                                                FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap" />
-                                    <TextBlock Text="{Binding RealtimeRoiSummary}" Style="{StaticResource MonoText}"
+                                    <TextBlock Text="{Binding RealtimeRoiSummary, Converter={StaticResource OperatorMessage}}" Style="{StaticResource MonoText}"
                                                FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap" />
                                     <WrapPanel Margin="0,6,0,0">
                                         <Button x:Name="RealtimeClearRoiCurveButton"
@@ -2287,14 +2197,14 @@
                                     </WrapPanel>
                                     <TextBlock Text="手动开始成像与 ROI" Style="{StaticResource GuideSectionTitle}"
                                                Margin="0,10,0,3" />
-                                    <TextBlock Text="首次建参考时，主按钮综合点击前当前同一工况连续段的全部质量合格帧，100 帧为最低门槛，无需等待对象静止或通过稳定阈值；点击“准备重锁”后则重新计数，只使用随后新采集的最近 300 个连续严格全绿帧。稳健统计会剔除离群帧。"
+                                    <TextBlock Text="按钮可用后，点击建立参考；需要更换参考时，点击“准备重锁”。"
                                                Style="{StaticResource HintText}" FontSize="10"
                                                Margin="0,0,0,5" TextWrapping="Wrap" />
-                                    <TextBlock Text="{Binding RealtimeReferenceWindowPreview}"
+                                    <TextBlock Text="{Binding RealtimeReferenceWindowPreview, Converter={StaticResource OperatorMessage}, ConverterParameter=Reference}"
                                                Style="{StaticResource HintText}" FontSize="10"
                                                Margin="0,3,0,0" TextWrapping="Wrap" />
                                     <Button x:Name="RealtimeUseHighQualityReferenceButton"
-                                            Content="{Binding RealtimeManualReferenceActionText}"
+                                            Content="{Binding RealtimeManualReferenceActionText, Converter={StaticResource OperatorMessage}, ConverterParameter=ReferenceButton}"
                                             ContentTemplate="{StaticResource WrappedButtonLabel}"
                                             ToolTip="首次建参考使用点击前最近连续高质量帧；准备重锁后只使用新采集的最近 300 个连续严格全绿帧。"
                                             Command="{Binding UseCurrentRealtimeReferenceCommand}"
@@ -2336,8 +2246,8 @@
                                                 Command="{Binding CancelRealtimeReferenceRelockCommand}"
                                                 MinWidth="88" Height="28" FontSize="12" Padding="4,0" />
                                     </WrapPanel>
-                                    <TextBlock Text="{Binding RealtimeReferenceRelockStateText}"
-                                               ToolTip="{Binding RealtimeReferenceRelockStateText}"
+                                    <TextBlock Text="{Binding RealtimeReferenceRelockStateText, Converter={StaticResource OperatorMessage}, ConverterParameter=Reference}"
+                                               ToolTip="{Binding RealtimeReferenceRelockStateText, Converter={StaticResource OperatorMessage}, ConverterParameter=Reference}"
                                                Style="{StaticResource HintText}" FontSize="10" Margin="0,4,0,0"
                                                TextWrapping="Wrap" />
                                     <StackPanel Visibility="{Binding RealtimeSynchronizedReferenceControlsVisibility}">
@@ -2357,44 +2267,24 @@
                                                     Command="{Binding CancelSynchronizedRealtimeReferenceRelockCommand}"
                                                     MinWidth="82" Height="28" FontSize="12" Padding="4,0" Margin="0,0,0,4" />
                                         </WrapPanel>
-                                        <TextBlock Text="{Binding RealtimeSynchronizedReferenceSummary}"
-                                                   ToolTip="{Binding RealtimeSynchronizedReferenceSummary}"
+                                        <TextBlock Text="{Binding RealtimeSynchronizedReferenceSummary, Converter={StaticResource OperatorMessage}, ConverterParameter=Reference}"
+                                                   ToolTip="{Binding RealtimeSynchronizedReferenceSummary, Converter={StaticResource OperatorMessage}, ConverterParameter=Reference}"
                                                    Style="{StaticResource HintText}" FontSize="10" Margin="0,2,0,0"
                                                    TextWrapping="Wrap" />
                                     </StackPanel>
                                         </StackPanel>
                                     </Border>
-                                    <ListBox ItemsSource="{Binding RealtimeImagingLogs}" Margin="16,10,16,16"
-                                             Height="180" Background="Transparent" BorderThickness="0"
-                                             ScrollViewer.VerticalScrollBarVisibility="Auto"
-                                             ScrollViewer.CanContentScroll="True"
-                                             VirtualizingPanel.IsVirtualizing="True"
-                                             VirtualizingPanel.VirtualizationMode="Recycling">
-                                        <ListBox.ItemContainerStyle>
-                                            <Style TargetType="ListBoxItem">
-                                                <Setter Property="Focusable" Value="False" />
-                                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                                            </Style>
-                                        </ListBox.ItemContainerStyle>
-                                        <ListBox.ItemTemplate>
-                                            <DataTemplate>
-                                                <Border BorderBrush="{StaticResource DividerBrush}" BorderThickness="0,0,0,1"
-                                                        Padding="0,7">
-                                                    <TextBlock Text="{Binding}" Style="{StaticResource MonoLog}" />
-                                                </Border>
-                                            </DataTemplate>
-                                        </ListBox.ItemTemplate>
-                                    </ListBox>
+
                                 </StackPanel>
                             </ScrollViewer>
                             <Border x:Name="RealtimeRightRailFooter" Grid.Row="2" Height="80" Padding="16,6"
                                     BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,1,0,0">
                                 <StackPanel>
-                                    <TextBlock Text="{Binding RealtimeImagingSummary}" Style="{StaticResource MonoText}"
-                                               ToolTip="{Binding RealtimeImagingSummary}"
+                                    <TextBlock Text="{Binding RealtimeImagingSummary, Converter={StaticResource OperatorMessage}}" Style="{StaticResource MonoText}"
+                                               ToolTip="{Binding RealtimeImagingSummary, Converter={StaticResource OperatorMessage}}"
                                                TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Text="{Binding RealtimeContactCalibrationExportStateText}"
-                                               ToolTip="{Binding RealtimeContactCalibrationExportStateText}"
+                                    <TextBlock Text="{Binding RealtimeContactCalibrationExportStateText, Converter={StaticResource OperatorMessage}}"
+                                               ToolTip="{Binding RealtimeContactCalibrationExportStateText, Converter={StaticResource OperatorMessage}}"
                                                Style="{StaticResource HintText}" FontSize="11" Margin="0,2,0,0"
                                                TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                                     <WrapPanel Margin="0,6,0,0">
@@ -2525,8 +2415,8 @@
                                                 Visibility="{Binding IsCatchUpRunning, Converter={StaticResource BoolToVis}}"
                                                 ToolTip="在当前块结束后停止；暂存 revision 不会发布，可稍后继续" />
                                         <TextBlock x:Name="CatchUpProgressText"
-                                                   Text="{Binding CatchUpProgressSummary}"
-                                                   ToolTip="{Binding CatchUpProgressSummary}"
+                                                   Text="{Binding CatchUpProgressSummary, Converter={StaticResource OperatorMessage}}"
+                                                   ToolTip="{Binding CatchUpProgressSummary, Converter={StaticResource OperatorMessage}}"
                                                    Style="{StaticResource HintText}" TextWrapping="NoWrap"
                                                    MaxWidth="320" Margin="10,4,0,0" VerticalAlignment="Center"
                                                    TextTrimming="CharacterEllipsis"
@@ -2542,7 +2432,7 @@
                                                     <Border Background="#DCEBF8" Padding="10,8" CornerRadius="5"
                                                             Visibility="{Binding Items[0].IsPseudo3d, Converter={StaticResource BoolToVis}}">
                                                         <StackPanel>
-                                                            <TextBlock Text="{Binding Name}" FontWeight="Bold" TextWrapping="Wrap" />
+                                                            <TextBlock Text="{Binding Items[0].LocalStartedAt, StringFormat=双层采集 · {0:yyyy-MM-dd HH:mm:ss}}" FontWeight="Bold" TextWrapping="Wrap" />
                                                             <TextBlock Text="同组双设备 · 选择下层或上层均可回放整组；单设备检查与导出跟随所选层。" TextWrapping="Wrap" FontSize="11" Margin="0,4,0,0" />
                                                         </StackPanel>
                                                     </Border>
@@ -2555,12 +2445,11 @@
                                             <StackPanel>
                                                 <TextBlock Text="{Binding Title}" FontFamily="{StaticResource MonoFont}"
                                                            FontWeight="Bold" FontSize="13" Foreground="{StaticResource Text1Brush}" />
-                                                <TextBlock Text="{Binding StateLine}" Style="{StaticResource MonoText}"
+                                                <TextBlock Text="{Binding OperatorSummary}" Style="{StaticResource MonoText}"
                                                            Foreground="{StaticResource Text2Brush}" FontSize="12" Margin="0,4,0,0" />
-                                                <TextBlock Text="{Binding CoverageLine}" Style="{StaticResource MonoText}" FontSize="11" Margin="0,4,0,0" />
+
                                                 <TextBlock Text="{Binding ReplayLine}" Style="{StaticResource MonoText}" FontSize="11" Margin="0,3,0,0" />
-                                                <TextBlock Text="{Binding LocationLine}" Style="{StaticResource MonoText}" FontSize="11" Margin="0,3,0,0"
-                                                           TextWrapping="Wrap" />
+
                                             </StackPanel>
                                         </DataTemplate>
                                     </ListBox.ItemTemplate>
@@ -2666,7 +2555,7 @@
                                 <views:Pseudo3dReplayView DockPanel.Dock="Top"
                                     DataContext="{Binding DataContext.Pseudo3dReplay, RelativeSource={RelativeSource AncestorType=Window}}" />
                                 <TextBlock DockPanel.Dock="Top"
-                                           Text="实时回放只包含采集期间实际完成逆问题并提交到界面的帧；离线回放只使用手动完整重算后发布的全覆盖 revision。两条线路的重构值、显示参数、ROI 与导出相互隔离。"
+                                           Text="看采集时的画面选“实时回放”；查看完整结果请生成“离线回放”。双层已保存图像可在组回放中查看。"
                                            Visibility="{Binding DataContext.Pseudo3dReplay.ShowDeviceReplay, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVis}}"
                                            Style="{StaticResource HintText}" Margin="0,8,0,0" />
                                 <Grid Margin="0,12,0,0"
@@ -2682,7 +2571,7 @@
                                                 <RowDefinition Height="Auto" />
                                                 <RowDefinition Height="Auto" />
                                             </Grid.RowDefinitions>
-                                        <TextBlock Grid.Row="0" Text="{Binding ReplayRunSummary}" Style="{StaticResource MonoText}"
+                                        <TextBlock Grid.Row="0" Text="{Binding ReplayRunSummary, Converter={StaticResource OperatorMessage}, ConverterParameter=Run}" Style="{StaticResource MonoText}"
                                                    Foreground="{StaticResource Text2Brush}" FontSize="12" />
                                         <Grid Grid.Row="1" Margin="0,10,0,0">
                                             <Grid.ColumnDefinitions>
@@ -2854,7 +2743,7 @@
                                                         <RowDefinition Height="*" />
                                                         <RowDefinition Height="Auto" />
                                                     </Grid.RowDefinitions>
-                                                    <TextBlock Grid.Row="0" Text="{Binding ReplayRoiSummary}"
+                                                    <TextBlock Grid.Row="0" Text="{Binding ReplayRoiSummary, Converter={StaticResource OperatorMessage}}"
                                                                Style="{StaticResource MonoText}" FontSize="11"
                                                                TextWrapping="Wrap" />
                                                     <Viewbox Grid.Row="1" Stretch="Fill" Margin="0,6,0,0" Height="98">
@@ -2971,33 +2860,14 @@
                                                 <Button Content="{Binding OfflineReplayButtonText}"
                                                         Command="{Binding ToggleOfflineReplayCommand}"
                                                         MinWidth="112" Margin="8,0,0,0"
-                                                        ToolTip="仅回放手动完整重算并原子发布的 offline-complete revision" />
+                                                        ToolTip="查看已生成的离线完整结果" />
                                             </StackPanel>
                                             <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
-                                                <TextBlock Text="{Binding ReplayLaneSummary}" Style="{StaticResource MonoText}"
-                                                           Foreground="{StaticResource Text2Brush}" FontSize="11"
-                                                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
-                                                <TextBlock Text="{Binding ReplayLoadStatus}" Style="{StaticResource MonoText}"
-                                                           ToolTip="{Binding ReplayLoadStatus}"
-                                                           Foreground="#0b78c8" FontSize="11"
-                                                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
-                                                           Height="16" />
-                                                <!-- B178/V293: both summaries keep a fixed line box; frames with and
-                                                     without reconstruction produce different text lengths, and a
-                                                     1↔2-line wrap toggle made the whole panel jump every frame. -->
-                                                <TextBlock Text="{Binding ReplayFrameSummary}" Style="{StaticResource MonoText}"
-                                                           ToolTip="{Binding ReplayFrameSummary}"
-                                                           Foreground="{StaticResource Text3Brush}" FontSize="12"
-                                                           TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
-                                                           LineHeight="16" LineStackingStrategy="BlockLineHeight"
-                                                           Height="32" />
-                                                <TextBlock Text="{Binding ReplayContactSummary}" Style="{StaticResource MonoText}"
-                                                           ToolTip="{Binding ReplayContactSummary}"
-                                                           Foreground="{StaticResource Text2Brush}" FontSize="12"
-                                                           Margin="0,3,0,0" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
-                                                           LineHeight="16" LineStackingStrategy="BlockLineHeight"
-                                                           Height="48" />
-                                            </StackPanel>
+    <TextBlock x:Name="ReplayOperatorProgress" Text="{Binding ReplayLoadStatus, Converter={StaticResource OperatorMessage}, ConverterParameter=Load}"
+               TextWrapping="Wrap" FontSize="12" Foreground="#0b78c8" />
+    <TextBlock x:Name="ReplayOperatorFrame" Text="{Binding ReplayFrameSummary, Converter={StaticResource OperatorMessage}, ConverterParameter=Frame}"
+               TextWrapping="Wrap" FontSize="12" Margin="0,3,0,0" />
+</StackPanel>
                                         </DockPanel>
                                     </Grid>
                                 </Grid>
@@ -3047,6 +2917,102 @@
                             </StackPanel>
                         </Border>
 
+<Expander Header="技术诊断与采集明细" IsExpanded="False" Margin="0,18,0,0">
+    <StackPanel Margin="12"><ScrollViewer x:Name="RealtimeReconstructionDiagnostics" ClipToBounds="True"
+
+                                                      VerticalScrollBarVisibility="Auto"
+                                                      HorizontalScrollBarVisibility="Disabled">
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding RealtimeReconstructionActivity}"
+                                                           ToolTip="{Binding RealtimeReconstructionActivity}"
+                                                           Style="{StaticResource MonoText}" FontSize="11"
+                                                           Foreground="#0b78c8"
+                                                           TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
+                                                           LineHeight="15" LineStackingStrategy="BlockLineHeight"
+                                                           Height="60" />
+                                                <TextBlock Text="{Binding RealtimeImageStats}"
+                                                           ToolTip="{Binding RealtimeImageStats}"
+                                                           Style="{StaticResource MonoText}" FontSize="11" Margin="0,4,0,0"
+                                                           TextWrapping="Wrap" />
+                                                <TextBlock Text="{Binding RealtimeBaselineIntegritySummary}"
+                                                           ToolTip="{Binding RealtimeBaselineIntegritySummary}"
+                                                           Style="{StaticResource MonoText}" FontSize="11" Margin="0,6,0,0"
+                                                           TextWrapping="Wrap" />
+                                                <TextBlock Text="{Binding RealtimeContactSummary}"
+                                                           ToolTip="{Binding RealtimeContactSummary}"
+                                                           Style="{StaticResource MonoText}" FontSize="11" Margin="0,6,0,0"
+                                                           TextWrapping="Wrap" />
+                                                <TextBlock Text="{Binding RealtimeMultiFrequencySummary}"
+                                                           ToolTip="{Binding RealtimeMultiFrequencySummary}"
+                                                           Style="{StaticResource MonoText}" FontSize="11" Margin="0,6,0,0"
+                                                           TextWrapping="Wrap" />
+                                                <Border Background="{StaticResource SunkenBrush}"
+                                                        BorderBrush="{StaticResource DividerBrush}"
+                                                        BorderThickness="1" CornerRadius="6" Padding="7,6" Margin="0,8,0,0">
+                                                    <StackPanel>
+                                                        <TextBlock Text="{Binding RealtimeDataQualityStatus}" Style="{StaticResource MonoText}" FontSize="10" TextWrapping="Wrap" />
+                                                        <TextBlock Text="{Binding RealtimeReferenceModeStatus}" Style="{StaticResource MonoText}" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                                        <TextBlock Text="{Binding RealtimeReconstructionQualityStatus}" Style="{StaticResource MonoText}" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                                        <TextBlock Text="{Binding RealtimeRoiReadinessStatus}" Style="{StaticResource MonoText}" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                                    </StackPanel>
+                                                </Border>
+                                            </StackPanel>
+                                        </ScrollViewer>        <TextBlock Text="{Binding RealtimeRawWaveStats}" TextWrapping="Wrap" />
+<TextBlock Text="{Binding RealtimeDemodStats}" TextWrapping="Wrap" />
+<TextBlock Text="{Binding RealtimeBoundaryStats}" TextWrapping="Wrap" />
+<TextBlock Text="{Binding RealtimeReferenceSummary}" TextWrapping="Wrap" Margin="0,8,0,0" />
+        <TextBlock Text="{Binding RealtimePseudo3dProvenance}" TextWrapping="Wrap" />
+        <TextBlock Text="{Binding Pseudo3dReplay.Summary}" TextWrapping="Wrap" />
+        <TextBlock Text="{Binding Pseudo3dReplay.Status}" TextWrapping="Wrap" />
+        <TextBlock Text="{Binding Pseudo3dReplay.LowerLabel}" TextWrapping="Wrap" />
+        <TextBlock Text="{Binding Pseudo3dReplay.UpperLabel}" TextWrapping="Wrap" />
+        <TextBlock Text="{Binding RealtimeImagingSummary}" TextWrapping="Wrap" /><ListBox ItemsSource="{Binding RealtimeImagingLogs}" Margin="16,10,16,16"
+                                             Height="180" Background="Transparent" BorderThickness="0"
+                                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                             ScrollViewer.CanContentScroll="True"
+                                             VirtualizingPanel.IsVirtualizing="True"
+                                             VirtualizingPanel.VirtualizationMode="Recycling">
+                                        <ListBox.ItemContainerStyle>
+                                            <Style TargetType="ListBoxItem">
+                                                <Setter Property="Focusable" Value="False" />
+                                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                            </Style>
+                                        </ListBox.ItemContainerStyle>
+                                        <ListBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border BorderBrush="{StaticResource DividerBrush}" BorderThickness="0,0,0,1"
+                                                        Padding="0,7">
+                                                    <TextBlock Text="{Binding}" Style="{StaticResource MonoLog}" />
+                                                </Border>
+                                            </DataTemplate>
+                                        </ListBox.ItemTemplate>
+                                    </ListBox>        <StackPanel DataContext="{Binding VisualizationWorkspace}">
+                                                <TextBlock Text="{Binding ReplayLaneSummary}" Style="{StaticResource MonoText}"
+                                                           Foreground="{StaticResource Text2Brush}" FontSize="11"
+                                                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Text="{Binding ReplayLoadStatus}" Style="{StaticResource MonoText}"
+                                                           ToolTip="{Binding ReplayLoadStatus}"
+                                                           Foreground="#0b78c8" FontSize="11"
+                                                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                                           Height="16" />
+                                                <!-- B178/V293: both summaries keep a fixed line box; frames with and
+                                                     without reconstruction produce different text lengths, and a
+                                                     1↔2-line wrap toggle made the whole panel jump every frame. -->
+                                                <TextBlock Text="{Binding ReplayFrameSummary}" Style="{StaticResource MonoText}"
+                                                           ToolTip="{Binding ReplayFrameSummary}"
+                                                           Foreground="{StaticResource Text3Brush}" FontSize="12"
+                                                           TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
+                                                           LineHeight="16" LineStackingStrategy="BlockLineHeight"
+                                                           Height="32" />
+                                                <TextBlock Text="{Binding ReplayContactSummary}" Style="{StaticResource MonoText}"
+                                                           ToolTip="{Binding ReplayContactSummary}"
+                                                           Foreground="{StaticResource Text2Brush}" FontSize="12"
+                                                           Margin="0,3,0,0" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
+                                                           LineHeight="16" LineStackingStrategy="BlockLineHeight"
+                                                           Height="48" />
+                                                    </StackPanel>
+    </StackPanel>
+</Expander>
                         <!-- field evidence snapshot (single export) -->
                         <Border Style="{StaticResource PanelCard}" Margin="0,18,0,0">
                             <StackPanel Margin="18">

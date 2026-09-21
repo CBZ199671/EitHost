@@ -189,6 +189,14 @@ internal static class RealtimeVisualizationProjection
               $" · 去尺度形状 {stability.RealShapeResidualPercent:0.00000}%（仅诊断）";
     }
 
+    internal static IReadOnlyList<RealtimeDemodulationAxisTick> CreateRangeTicks(double min, double max)
+    {
+        if (Math.Abs(max - min) < double.Epsilon) { min -= 1; max += 1; }
+        return new[] { (max, 14.0), ((min + max) / 2, 110.0), (min, 206.0) }
+            .Select(tick => new RealtimeDemodulationAxisTick(tick.Item1, FormatVoltageAxisLabel(tick.Item1),
+                tick.Item2, tick.Item2 - 9, tick.Item1 == 0)).ToArray();
+    }
+
     private static (string Top, string Middle, string Bottom) FormatVoltageAxisLabels(double min, double max)
     {
         if (!double.IsFinite(min) || !double.IsFinite(max))

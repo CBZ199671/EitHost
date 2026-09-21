@@ -540,7 +540,7 @@ internal sealed class ReplayVisualizationController : IDisposable
                 ? string.Empty
                 : $" · 可信基准证据 {replayTrustedNeutralEvidence.Count}";
             workspace.ReplayRunSummary =
-                $"{detail.SetLabel} · {detail.StartedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss} ~ {ended} · {detail.ReconstructionRoute}{laneSummary} · 重构帧 {frames.Count}{neutralEvidenceSummary}";
+                $"{detail.SetLabel} · {detail.StartedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss} ~ {ended} · {detail.ReconstructionRoute}{laneSummary} · 回放帧 {frames.Count}{neutralEvidenceSummary}";
             if (frames.Count == 0)
             {
                 if (replayTrustedNeutralEvidence.Count > 0)

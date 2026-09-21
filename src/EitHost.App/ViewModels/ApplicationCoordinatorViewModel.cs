@@ -303,7 +303,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
             Application.Current?.Dispatcher,
             static () => Application.Current?.Dispatcher);
         // Composed first: startup steps below already report operator status.
-        operatorStatus = new OperatorStatusPresenter(message => AddPanelLog(ActivityLogs, message));
+        operatorStatus = new OperatorStatusPresenter(message => { AddRealtimeDiagnostic(message); AddPanelLog(ActivityLogs, message); });
         operatorStatus.PropertyChanged += OnChildWorkspacePropertyChanged;
         ArgumentNullException.ThrowIfNull(insertionMonitor);
         this.usb2070NativeApi = usb2070NativeApi ?? throw new ArgumentNullException(nameof(usb2070NativeApi));
@@ -716,7 +716,7 @@ public partial class ApplicationCoordinatorViewModel : ObservableObject, IDispos
             HardwareWorkspace,
             CreateHardwareEvidenceSnapshot,
             resolvedHardwareSmokeCapture,
-            message => StatusMessage = message));
+            message => StatusMessage = message, () => realtimeDiagnostics.GlobalLogPath));
         HardwareWorkspace.AttachDiscoveryController(new HardwareDiscoveryController(
             HardwareWorkspace,
             insertionMonitor,

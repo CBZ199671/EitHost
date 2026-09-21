@@ -776,7 +776,7 @@ public sealed class DerivedArtifactHdf5Writer
             Directory.CreateDirectory(directory);
         }
 
-        var temporaryPath = $"{fullPath}.{Guid.NewGuid():N}.partial";
+        var temporaryPath = CreateTemporaryPath(fullPath);
         try
         {
             Hdf5IncrementalStageAppender.Create(temporaryPath, file, stage, blockRoot);
@@ -814,7 +814,7 @@ public sealed class DerivedArtifactHdf5Writer
             latest,
             snapshot.Stages.Count == 1 ? latest.Stage : "combined",
             includeCompletionMarker: true);
-        var temporaryPath = $"{fullPath}.{Guid.NewGuid():N}.migration.partial";
+        var temporaryPath = CreateTemporaryPath(fullPath);
         try
         {
             Hdf5IncrementalStageAppender.CreateMigrated(temporaryPath, snapshot.Content);
@@ -914,7 +914,7 @@ public sealed class DerivedArtifactHdf5Writer
             Directory.CreateDirectory(directory);
         }
 
-        var temporaryPath = $"{fullPath}.{Guid.NewGuid():N}.partial";
+        var temporaryPath = CreateTemporaryPath(fullPath);
         try
         {
             file.Write(temporaryPath);
@@ -932,6 +932,12 @@ public sealed class DerivedArtifactHdf5Writer
             AtomicFileCommitter.DeleteBestEffort(temporaryPath);
         }
     }
+
+    // Keep same-directory atomic moves without repeating the target filename.
+    // Offline revision directories in the default install already approach the
+    // native Windows path limit, which the test host's manifest can hide.
+    private static string CreateTemporaryPath(string fullPath) =>
+        Path.Combine(Path.GetDirectoryName(fullPath)!, $".{Guid.NewGuid():N}.partial");
 }
 
 public sealed record DerivedDemodulatedBlockData(

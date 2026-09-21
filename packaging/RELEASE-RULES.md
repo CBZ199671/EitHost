@@ -1,19 +1,19 @@
 # EitHost 唯一发布目录规则
 
-用户于 2026-09-14 指定：每次完成 EitHost 修改后，都应构建对应最新版本，替换同一个日常运行目录。该规则与根目录 `AGENTS.md` 一起执行。
+完成影响 EitHost 程序、运行配置或构建/打包流程的修改后，应构建对应版本并替换同一个日常运行目录。纯文档、注释或 agent 指令修改按其影响检查即可。该规则与根目录 `AGENTS.md` 一起执行。
 
 唯一入口：`release/EitHost-Windows-x64/EitHost.App.exe`。
 本工作区的绝对目录：`C:\Users\huolo\Desktop\EIT updata\EitHost\release\EitHost-Windows-x64`。
 
-## 每次任务的完成要求
+## 程序更新的完成要求
 
-1. 完成当前任务的源码、配置、脚本或文档修改；应用版本统一维护在 `src/EitHost.App/EitHost.App.csproj`。程序行为更新至少递增补丁版本。
+1. 完成当前任务中影响程序或打包的修改；应用版本统一维护在 `src/EitHost.App/EitHost.App.csproj`。程序行为更新至少递增补丁版本。
 2. 运行与改动相关的测试和验证。
 3. 在 Windows 项目根目录执行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-eithost.ps1`。双击 `package.cmd` 或无参数调用 `scripts/publish-eithost.ps1` 等价。
 4. 脚本从已保存的当前源码构建 Windows x64 自包含版本，执行 HDF5 包级检查，使用事务更新器替换唯一目录中的程序并验证 `Data` 保留，再核对安装后程序版本和运行库。
 5. 核对 `VERSION.json`、`SHA256SUMS.txt`、`release/publish-manifest.json`。向用户只交付唯一目录中的 EXE 链接。若验证或替换失败，报告实际失败，不能把旧程序说成最新版本。
 
-同一任务的多次编辑合并后发布一次；发布后再修改项目文件需要再次发布。无需每保存一个文件就构建。只有完成源码修改而没有生成对应版本，不算完成交付。
+同一任务的多次编辑合并后发布一次；发布后再修改影响构建产物的内容，需要再次发布。无需每保存一个文件就构建。只有完成程序修改而没有生成对应版本，不算完成交付。
 
 ## 数据与历史
 

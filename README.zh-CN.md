@@ -104,7 +104,7 @@ PyEIDORS v2 是下一代重大版本，包含大量新增能力、架构改进�
 
 仓库中的 `release/EitHost-Windows-x64` 保留发布包的随附文件与校验值，但不含可执行文件：自包含 EXE 超过 GitHub 单文件 100 MiB 上限，因此作为 release 附件分发，从源码构建也会生成同一个 EXE。
 
-**本项目统一发布规则：** 每次完成修改并通过相关验证后，运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-eithost.ps1`，更新唯一运行目录 `release/EitHost-Windows-x64` 并保留现有 `Data`。版本从项目文件读取，不再自动生成分散的日期/版本目录。详见 [发布规则](packaging/RELEASE-RULES.md)。
+**本项目统一发布规则：** 完成影响程序、运行配置或构建/打包流程的修改并通过相关验证后，运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-eithost.ps1`，更新唯一运行目录 `release/EitHost-Windows-x64` 并保留现有 `Data`。版本从项目文件读取，不再自动生成分散的日期/版本目录。纯文档、注释或 agent 指令修改按其影响检查即可。详见 [发布规则](packaging/RELEASE-RULES.md)。
 
 ### 从源码构建
 

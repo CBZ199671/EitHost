@@ -18,6 +18,8 @@ internal sealed class OperatorStatusPresenter(Action<string> appendActivityLog) 
     private StatusSeverity statusMessageSeverity = StatusSeverity.Info;
     private string lastErrorMessage = string.Empty;
     private int unreviewedErrorCount;
+    private string lastReportedMessage = string.Empty;
+    private StatusSeverity lastReportedSeverity;
 
     internal event Action? AcknowledgeAvailabilityChanged;
 
@@ -60,21 +62,27 @@ internal sealed class OperatorStatusPresenter(Action<string> appendActivityLog) 
 
     internal void Report(string message, StatusSeverity severity)
     {
-        SetProperty(ref statusMessage, message, nameof(StatusMessage));
+        var operatorMessage = OperatorMessageText.Format(message);
+        SetProperty(ref statusMessage, operatorMessage, nameof(StatusMessage));
         StatusMessageSeverity = severity;
+        if (string.Equals(message, lastReportedMessage, StringComparison.Ordinal) && severity == lastReportedSeverity) return;
+        lastReportedMessage = message;
+        lastReportedSeverity = severity;
+        if (!string.IsNullOrWhiteSpace(message))
+            appendActivityLog($"{DateTime.Now:HH:mm:ss} [{(severity == StatusSeverity.Error ? "失败" : severity == StatusSeverity.Warning ? "提醒" : "状态")}] {message}");
         if (severity != StatusSeverity.Error || string.IsNullOrWhiteSpace(message))
         {
             return;
         }
 
-        lastErrorMessage = message;
+        lastErrorMessage = operatorMessage;
         UnreviewedErrorCount = checked(UnreviewedErrorCount + 1);
         OnPropertyChanged(nameof(UnreviewedErrorSummary));
-        appendActivityLog($"{DateTime.Now:HH:mm:ss} [失败] {message}");
     }
 
     internal void Acknowledge()
     {
+        lastReportedMessage = string.Empty;
         lastErrorMessage = string.Empty;
         UnreviewedErrorCount = 0;
     }

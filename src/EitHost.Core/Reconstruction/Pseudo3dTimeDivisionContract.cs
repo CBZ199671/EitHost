@@ -31,6 +31,22 @@ public static class Pseudo3dTimeDivisionContract
         lower is not null && upper is not null && lower.SessionId == upper.SessionId &&
         lower.Round == upper.Round && lower.Slot == 0 && upper.Slot == 1;
 
+    internal static bool AreConsecutiveAcquisitions(Pseudo3dAcquisitionStamp? previous, Pseudo3dAcquisitionStamp? current)
+    {
+        if (previous is null || current is null || previous.Slot is not (0 or 1) ||
+            previous.SessionId != current.SessionId || previous.Slot != current.Slot ||
+            previous.Profile != current.Profile || previous.FrequencyTuningWord != current.FrequencyTuningWord ||
+            previous.Round != current.Round - 1 || current.CaptureStartedAt <= previous.SampleMidpoint)
+            return false;
+        try
+        {
+            ValidateStamp(previous, previous.SampleMidpoint, previous.Slot);
+            ValidateStamp(current, current.SampleMidpoint, previous.Slot);
+            return true;
+        }
+        catch (InvalidDataException) { return false; }
+    }
+
     public static void ValidatePair(LayeredPseudo3dSource lower, LayeredPseudo3dSource upper)
     {
         ValidateSource(lower, 0);

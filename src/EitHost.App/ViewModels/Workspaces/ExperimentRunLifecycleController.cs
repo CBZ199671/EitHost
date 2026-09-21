@@ -303,6 +303,10 @@ internal sealed class ExperimentRunLifecycleController
             update => callbacks.PublishCatchUpProgress(DescribeProgress(setLabel, update)));
         try
         {
+            if (UsePublishedOfflineComplete(experimentRunId, setLabel))
+            {
+                return;
+            }
             callbacks.PublishCatchUpProgress($"{setLabel} 离线完整重算：正在补齐原始解调…");
             var report = await Task
                 .Run(
@@ -310,6 +314,10 @@ internal sealed class ExperimentRunLifecycleController
                     cancellation.Token)
                 .ConfigureAwait(false);
             RefreshPipelineManifestInputs(experimentRunId, setLabel);
+            if (UsePublishedOfflineComplete(experimentRunId, setLabel))
+            {
+                return;
+            }
             var preflight = offlineCompleteService.Preflight(experimentRunId);
             if (!preflight.CanStart)
             {
@@ -382,6 +390,21 @@ internal sealed class ExperimentRunLifecycleController
             operationLease.Dispose();
             callbacks.PublishCatchUpProgress(string.Empty);
         }
+    }
+
+    internal bool UsePublishedOfflineComplete(Guid experimentRunId, string setLabel)
+    {
+        var preflight = offlineCompleteService.Preflight(experimentRunId);
+        if (preflight.PublishedRevisionId is not { } revisionId)
+        {
+            return false;
+        }
+
+        callbacks.RunDiagnostic(experimentRunId,
+            $"{setLabel} offline-complete reused run={experimentRunId:D} revision={revisionId}");
+        callbacks.RefreshRuns();
+        callbacks.PublishStatus($"{setLabel} 离线结果已就绪。请点击下方“离线回放”查看。");
+        return true;
     }
 
     private static string DescribeProgress(string setLabel, ExperimentCatchUpProgress update)

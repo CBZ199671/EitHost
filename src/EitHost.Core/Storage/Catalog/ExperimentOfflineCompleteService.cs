@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
+using EitHost.Core.Acquisition;
 using EitHost.Core.Application.Realtime;
 using EitHost.Core.Diagnostics.ElectrodeContact;
 using EitHost.Core.Reconstruction;
@@ -21,7 +22,8 @@ public sealed record OfflineCompletePreflight(
     long EstimatedIncrementalBytes,
     long AvailableBytes,
     string? ResumableRevisionId,
-    string? AlgorithmFingerprint);
+    string? AlgorithmFingerprint,
+    string? PublishedRevisionId = null);
 
 public sealed record OfflineCompleteReport(
     Guid ExperimentRunId,
@@ -217,7 +219,8 @@ public sealed class ExperimentOfflineCompleteService
                 0,
                 GetAvailableBytes(),
                 null,
-                fingerprint);
+                fingerprint,
+                published.RevisionId);
         }
 
         var resumable = catalog.ListReconstructionRevisions(
@@ -252,6 +255,10 @@ public sealed class ExperimentOfflineCompleteService
     {
         cancellationToken.ThrowIfCancellationRequested();
         var preflight = Preflight(experimentRunId);
+        if (preflight.PublishedRevisionId is { } publishedRevisionId)
+        {
+            return CreatePublishedReport(experimentRunId, publishedRevisionId);
+        }
         if (!preflight.CanStart)
         {
             return new OfflineCompleteReport(
@@ -414,6 +421,7 @@ public sealed class ExperimentOfflineCompleteService
         double[]? fullAmplitude256 = null;
         double[]? fullReal256 = null;
         double[]? fullImaginary256 = null;
+        Pseudo3dAcquisitionStamp? timeDivision = null;
         var highQuality = block.AcceptedFrameCount >= manifest.Demodulation.MinimumAcceptedFrames;
         using (var file = Hdf5FileAccess.OpenReadWithRetry(
                    layout.ResolveArtifactPath(demodArtifact.ArtifactPath)))
@@ -435,6 +443,14 @@ public sealed class ExperimentOfflineCompleteService
             fullAmplitude256 = ReadOptionalVector(file, At(blockRoot, "/demod/mean_full_amplitude_256"));
             fullReal256 = ReadOptionalVector(file, At(blockRoot, "/demod/mean_full_real_256"));
             fullImaginary256 = ReadOptionalVector(file, At(blockRoot, "/demod/mean_full_imaginary_256"));
+            if (file.LinkExists(At(blockRoot, "/demod/time_division_json")))
+            {
+                timeDivision = JsonSerializer.Deserialize<Pseudo3dAcquisitionStamp>(
+                    file.Dataset(At(blockRoot, "/demod/time_division_json")).Read<string>()) ??
+                    throw new InvalidDataException($"block {block.BlockNumber} 的分时采集标记为空。");
+                if (timeDivision.Round != block.BlockNumber || timeDivision.SampleMidpoint != block.AcquiredAt)
+                    throw new InvalidDataException($"block {block.BlockNumber} 的分时轮次或采样中点不匹配。");
+            }
         }
 
         if (target is not { Length: RealtimeReconstructionRequest.BoundaryVoltageCount })
@@ -445,6 +461,13 @@ public sealed class ExperimentOfflineCompleteService
         var epoch = epochs.LastOrDefault(candidate =>
             candidate.LockedStartSampleIndex >= 0 &&
             candidate.LockedStartSampleIndex < block.SourceStartSampleIndex);
+        // A preview reference has no formal diagnostic baseline. Preserve these
+        // blocks as explicit no-reference outcomes; never reach back to an older
+        // epoch or invent candidates/weights for the provisional interval.
+        if (epoch?.LockKind == "provisional_preview")
+        {
+            epoch = null;
+        }
 
         return new OfflineBlockInput(
             block,
@@ -461,7 +484,20 @@ public sealed class ExperimentOfflineCompleteService
             epoch,
             ElectrodeStates: null,
             ContactSummary: null,
-            ContactEvidencePolicy: $"{OfflineContactUnavailablePrefix}:not-evaluated");
+            ContactEvidencePolicy: $"{OfflineContactUnavailablePrefix}:not-evaluated",
+            TimeDivision: timeDivision);
+    }
+
+    private static bool AreConsecutiveInputs(OfflineBlockInput previous, OfflineBlockInput current)
+    {
+        if (previous.TimeDivision is null && current.TimeDivision is null)
+            return previous.Block.SourceEndSampleIndex == current.Block.SourceStartSampleIndex;
+
+        // Finite slots discard quiet leading/trailing ADC rows. Those sample gaps
+        // are expected only when persisted acquisition stamps prove adjacent rounds
+        // for the same device/session/profile; a missing round still resets state.
+        return previous.Block.SourceEndSampleIndex <= current.Block.SourceStartSampleIndex &&
+               Pseudo3dTimeDivisionContract.AreConsecutiveAcquisitions(previous.TimeDivision, current.TimeDivision);
     }
 
     private static IReadOnlyDictionary<int, OfflineDiagnosticState> CreateOfflineDiagnosticStates(
@@ -482,6 +518,11 @@ public sealed class ExperimentOfflineCompleteService
         var states = new Dictionary<int, OfflineDiagnosticState>();
         foreach (var epoch in epochs)
         {
+            if (epoch.LockKind == "provisional_preview")
+            {
+                continue;
+            }
+
             var boundary = CreateOfflineBoundaryState(manifest, epoch, candidatesById);
             ElectrodeContactMonitor? contactMonitor = null;
             if (boundary.ReferenceFullReal256 is not null && boundary.ReferenceFullImaginary256 is not null)
@@ -752,7 +793,7 @@ public sealed class ExperimentOfflineCompleteService
 
         var continuityReset = previousInput is null ||
             previousInput.ReferenceEpoch?.ReferenceEpoch != input.ReferenceEpoch.ReferenceEpoch ||
-            previousInput.Block.SourceEndSampleIndex != input.Block.SourceStartSampleIndex ||
+            !AreConsecutiveInputs(previousInput, input) ||
             !previousInput.HighQuality ||
             previousInput.ReferenceInvalidated;
         if (continuityReset)
@@ -887,7 +928,7 @@ public sealed class ExperimentOfflineCompleteService
         {
             var input = inputs[index];
             var discontinuity = index > 0 &&
-                inputs[index - 1].Block.SourceEndSampleIndex != input.Block.SourceStartSampleIndex;
+                !AreConsecutiveInputs(inputs[index - 1], input);
             var sameEpoch = segment.Count == 0 ||
                 inputs[segment[^1]].ReferenceEpoch?.ReferenceEpoch == input.ReferenceEpoch?.ReferenceEpoch;
             if (discontinuity || !sameEpoch)
@@ -1559,7 +1600,8 @@ public sealed class ExperimentOfflineCompleteService
         ImagingReferenceEpochRecord? ReferenceEpoch,
         string[]? ElectrodeStates,
         string? ContactSummary,
-        string ContactEvidencePolicy);
+        string ContactEvidencePolicy,
+        Pseudo3dAcquisitionStamp? TimeDivision);
 
     private sealed record OfflineFramePlan(
         OfflineBlockInput Input,

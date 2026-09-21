@@ -49,17 +49,20 @@ internal sealed class HardwareEvidenceController
     private readonly Func<HardwareEvidenceSnapshot> captureSnapshot;
     private readonly Func<CancellationToken, Task<HardwareSmokeReport>> smokeCapture;
     private readonly Action<string> publishStatus;
+    private readonly Func<string>? getDiagnosticLogPath;
 
     internal HardwareEvidenceController(
         HardwareWorkspaceViewModel workspace,
         Func<HardwareEvidenceSnapshot> captureSnapshot,
         Func<CancellationToken, Task<HardwareSmokeReport>> smokeCapture,
-        Action<string> publishStatus)
+        Action<string> publishStatus,
+        Func<string>? getDiagnosticLogPath = null)
     {
         this.workspace = workspace ?? throw new ArgumentNullException(nameof(workspace));
         this.captureSnapshot = captureSnapshot ?? throw new ArgumentNullException(nameof(captureSnapshot));
         this.smokeCapture = smokeCapture ?? throw new ArgumentNullException(nameof(smokeCapture));
         this.publishStatus = publishStatus ?? throw new ArgumentNullException(nameof(publishStatus));
+        this.getDiagnosticLogPath = getDiagnosticLogPath;
     }
 
     internal static Func<CancellationToken, Task<HardwareSmokeReport>> CreateRealSmokeCapture(
@@ -269,6 +272,17 @@ internal sealed class HardwareEvidenceController
             await ExportEvidenceIndexAsync().ConfigureAwait(true);
             steps.Add("证据索引");
 
+            var diagnosticSource = getDiagnosticLogPath?.Invoke() ??
+                Path.Combine(captureSnapshot().DataRootPath, "diagnostics", "realtime-startup.log");
+            if (File.Exists(diagnosticSource) && File.Exists(workspace.EvidenceIndexPath))
+            {
+                var diagnosticPath = Path.ChangeExtension(workspace.EvidenceIndexPath, ".diagnostics.log");
+                await CopyDiagnosticTailAsync(diagnosticSource, diagnosticPath).ConfigureAwait(true);
+                await File.AppendAllTextAsync(workspace.EvidenceIndexPath,
+                    $"\n\n[操作与诊断日志]({Path.GetFileName(diagnosticPath)})\n").ConfigureAwait(true);
+                steps.Add("操作与诊断日志");
+            }
+
             workspace.FieldSnapshotPath = workspace.EvidenceIndexPath;
             workspace.FieldSnapshotSummary = $"现场快照已导出：{string.Join("，", steps)}。";
             workspace.FieldSnapshotLogs.Insert(0, $"{DateTime.Now:HH:mm:ss} {workspace.FieldSnapshotSummary}");
@@ -278,6 +292,28 @@ internal sealed class HardwareEvidenceController
         {
             publishStatus($"导出现场快照失败：{ex.Message}");
         }
+    }
+
+    internal static async Task CopyDiagnosticTailAsync(string sourcePath, string targetPath)
+    {
+        const int maximumBytes = 1024 * 1024;
+        await using var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete, 8192, useAsync: true);
+        var length = source.Length;
+        var offset = Math.Max(0, length - maximumBytes);
+        source.Position = offset;
+        var bytes = new byte[(int)Math.Min(length, maximumBytes)];
+        var count = 0;
+        while (count < bytes.Length)
+        {
+            var read = await source.ReadAsync(bytes.AsMemory(count)).ConfigureAwait(false);
+            if (read == 0) break;
+            count += read;
+        }
+        // Drop the partial first line, including any split UTF-8 character.
+        var start = offset > 0 ? Array.IndexOf(bytes, (byte)'\n', 0, count) + 1 : 0;
+        await using var target = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.Read, 8192, useAsync: true);
+        await target.WriteAsync(bytes.AsMemory(start, count - start)).ConfigureAwait(false);
     }
 
     private static PairingManifest CreatePairingManifest(

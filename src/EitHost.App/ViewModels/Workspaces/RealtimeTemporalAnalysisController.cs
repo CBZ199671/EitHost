@@ -38,12 +38,13 @@ internal sealed class RealtimeTemporalAnalysisController
         var compensatedContactResult = config.EnableOutlierCompensation && !state.ReferenceIsProvisional
             ? contactResult
             : null;
-        var baseWeights = state.StartupDegradedReference?.MeasurementWeight208.ToArray() ??
-            compensatedContactResult?.MeasurementWeight208?.ToArray()
-            ?? Enumerable.Repeat(1.0, RealtimeReconstructionRequest.BoundaryVoltageCount).ToArray();
-        var basePolicy = state.StartupDegradedReference?.WeightPolicyVersion ??
-            compensatedContactResult?.WeightPolicyVersion ??
-            "all-one-v1";
+        var effectiveWeights = RealtimeBaseMeasurementWeights.Resolve(
+            state.ReferenceIsProvisional,
+            config.EnableOutlierCompensation,
+            state.StartupDegradedReference?.MeasurementWeight208 ?? compensatedContactResult?.MeasurementWeight208,
+            state.StartupDegradedReference?.WeightPolicyVersion ?? compensatedContactResult?.WeightPolicyVersion);
+        var baseWeights = effectiveWeights.Values;
+        var basePolicy = effectiveWeights.PolicyVersion;
         if (state.ReferenceUsesCommonScaleNormalization)
         {
             basePolicy = $"{basePolicy}+{EcdCwrCommonScaleNormalizer.PolicyVersion}";

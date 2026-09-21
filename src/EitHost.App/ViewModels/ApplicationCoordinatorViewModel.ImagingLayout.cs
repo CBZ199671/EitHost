@@ -57,7 +57,7 @@ public partial class ApplicationCoordinatorViewModel
     public GridLength RealtimeSettingsWidth => new(ShowRealtimeSettings ? 320 : 0);
     public GridLength RealtimeHistoryWidth => new(ShowRealtimeHistory ? 288 : 0);
     public GridLength RealtimeDiagnosticsWidth => new(ShowRealtimeDiagnostics ? 230 : 0);
-    public GridLength RealtimeAuxiliaryWidth => ShowRealtimeAuxiliary ? new(1, GridUnitType.Star) : new(0);
+    public GridLength RealtimeAuxiliaryWidth => ShowRealtimeAuxiliary ? new(1.4, GridUnitType.Star) : new(0);
     public Visibility RealtimeAuxiliaryVisibility => ShowRealtimeAuxiliary ? Visibility.Visible : Visibility.Collapsed;
     public Visibility RealtimeSettingsVisibility => ShowRealtimeSettings ? Visibility.Visible : Visibility.Collapsed;
     public Visibility RealtimeHistoryVisibility => ShowRealtimeHistory ? Visibility.Visible : Visibility.Collapsed;
