@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Media;
+using System.Windows.Markup;
 using System.Windows.Threading;
 
 namespace EitHost.App.Localization;
@@ -39,14 +40,10 @@ internal sealed class WindowLanguageController : IDisposable
     internal void SetLanguage(UiLanguage language)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        AttachSubtree(root);
-        if (CurrentLanguage == language)
-        {
-            return;
-        }
-
         CurrentLanguage = language;
         UiLanguageContext.Set(language);
+        root.SetCurrentValue(FrameworkElement.LanguageProperty, XmlLanguage.GetLanguage(CurrentCulture.Name));
+        AttachSubtree(root);
         ApplyAll();
     }
 
@@ -125,6 +122,16 @@ internal sealed class WindowLanguageController : IDisposable
     // translation as its own source and strand it there on the way back.
     private void AttachSubtree(DependencyObject subtreeRoot)
     {
+        // DatePicker owns generated date strings and an independent popup tree.
+        // They must be regenerated from culture, never cached as translated text.
+        for (var parent = GetLayoutParent(subtreeRoot); parent is not null; parent = GetLayoutParent(parent))
+        {
+            if (parent is DatePicker or System.Windows.Controls.Calendar)
+            {
+                return;
+            }
+        }
+
         attachDepth++;
         try
         {
@@ -140,7 +147,16 @@ internal sealed class WindowLanguageController : IDisposable
                     continue;
                 }
 
+                if (current is System.Windows.Controls.Calendar)
+                {
+                    continue;
+                }
+
                 AttachElement(current);
+                if (current is DatePicker)
+                {
+                    continue;
+                }
 
                 try
                 {
@@ -193,6 +209,14 @@ internal sealed class WindowLanguageController : IDisposable
 
         var registration = new ElementRegistration(element);
         registrations.Add(element, registration);
+
+        if (element is DatePicker datePicker)
+        {
+            var adapter = new DatePickerLanguageAdapter(datePicker, () => CurrentLanguage);
+            registration.DetachActions.Add(adapter.Dispose);
+            adapter.Apply();
+            return;
+        }
 
         switch (element)
         {
@@ -548,6 +572,11 @@ internal sealed class WindowLanguageController : IDisposable
 
     private void ApplyAll()
     {
+        foreach (var picker in registrations.Keys.OfType<DatePicker>().ToArray())
+        {
+            DatePickerLanguageAdapter.Apply(picker, CurrentLanguage);
+        }
+
         foreach (var registration in registrations.Values)
         {
             foreach (var property in registration.Properties)
