@@ -229,6 +229,18 @@ public static class WslPyEidorsBackendManifest
                     "所选目录中不存在 pyeidors.backend.json；请选择 PyEIDORS 稳定软件根目录。",
                     ex);
             }
+            catch (WslDistroNotReadyException ex) when (isWslManifest)
+            {
+                throw PyEidorsReconstructionException.FromFrontendConfiguration(
+                    manifestPath,
+                    "BackendManifestWslDistroNotReady",
+                    $"WSL 发行版 '{resolvedDistro}' 在 {ex.Timeout.TotalSeconds:0.###} 秒内未就绪，"
+                    + "无法读取 pyeidors.backend.json。请确认该发行版能够启动"
+                    + $"（可先执行 wsl -d {resolvedDistro} -- true 预热）；"
+                    + "若其 ext4.vhdx 位于机械硬盘，冷启动可能超出就绪预算，建议迁至固态硬盘后重试。"
+                    + $" 原因：{ex.Message}",
+                    ex);
+            }
             catch (IOException ex) when (isWslManifest)
             {
                 bool manifestExists;

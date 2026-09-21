@@ -11,6 +11,7 @@ internal static class WslTextFileReader
     private const int ProbeByteCount = MaximumUtf8ByteCount + 1;
     private const int MaximumRetainedStderrByteCount = 4096;
     internal static readonly TimeSpan DefaultReadTimeout = TimeSpan.FromSeconds(10);
+    internal static readonly TimeSpan DefaultDistroReadyTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan ProcessExitWait = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan PipeDrainWait = TimeSpan.FromSeconds(2);
     private static readonly UTF8Encoding StrictUtf8 = new(
@@ -20,6 +21,7 @@ internal static class WslTextFileReader
     internal static string ReadAllText(string distroName, string linuxAbsoluteFilePath)
     {
         var startInfo = CreateStartInfo(distroName, linuxAbsoluteFilePath);
+        EnsureDistroReady(distroName);
         return ReadAllTextAsync(
                 startInfo,
                 distroName,
@@ -33,6 +35,7 @@ internal static class WslTextFileReader
     internal static bool FileExists(string distroName, string linuxAbsoluteFilePath)
     {
         var startInfo = CreateFileExistsStartInfo(distroName, linuxAbsoluteFilePath);
+        EnsureDistroReady(distroName);
         return FileExistsAsync(
                 startInfo,
                 distroName,
@@ -58,6 +61,15 @@ internal static class WslTextFileReader
         return startInfo;
     }
 
+    internal static ProcessStartInfo CreateDistroReadyStartInfo(string distroName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(distroName);
+
+        var startInfo = CreateWslStartInfo(distroName);
+        startInfo.ArgumentList.Add("/usr/bin/true");
+        return startInfo;
+    }
+
     internal static ProcessStartInfo CreateFileExistsStartInfo(
         string distroName,
         string linuxAbsoluteFilePath)
@@ -69,6 +81,51 @@ internal static class WslTextFileReader
         startInfo.ArgumentList.Add("-f");
         startInfo.ArgumentList.Add(linuxAbsoluteFilePath);
         return startInfo;
+    }
+
+    internal static void EnsureDistroReady(string distroName)
+    {
+        EnsureDistroReadyAsync(
+                CreateDistroReadyStartInfo(distroName),
+                distroName,
+                DefaultDistroReadyTimeout,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+    }
+
+    internal static async Task EnsureDistroReadyAsync(
+        ProcessStartInfo startInfo,
+        string distroName,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        BoundedProcessCapture capture;
+        try
+        {
+            capture = await RunBoundedCaptureAsync(
+                startInfo,
+                distroName,
+                linuxAbsoluteFilePath: null,
+                MaximumRetainedStderrByteCount,
+                timeout,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (IOException ex)
+        {
+            throw new WslDistroNotReadyException(distroName, timeout, ex.Message, ex);
+        }
+
+        if (capture.ExitCode != 0)
+        {
+            throw new WslDistroNotReadyException(
+                distroName,
+                timeout,
+                BuildMessage(
+                    distroName,
+                    linuxAbsoluteFilePath: null,
+                    $"readiness probe exited with code {capture.ExitCode}; stderr={FormatStderr(capture.StandardError)}"));
+        }
     }
 
     internal static async Task<string> ReadAllTextAsync(
@@ -167,7 +224,7 @@ internal static class WslTextFileReader
     private static async Task<BoundedProcessCapture> RunBoundedCaptureAsync(
         ProcessStartInfo startInfo,
         string distroName,
-        string linuxAbsoluteFilePath,
+        string? linuxAbsoluteFilePath,
         int maximumRetainedStdoutByteCount,
         TimeSpan timeout,
         CancellationToken cancellationToken)
@@ -391,9 +448,14 @@ internal static class WslTextFileReader
         }
     }
 
-    private static void ValidateLocation(string distroName, string linuxAbsoluteFilePath)
+    private static void ValidateLocation(string distroName, string? linuxAbsoluteFilePath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(distroName);
+        if (linuxAbsoluteFilePath is null)
+        {
+            return;
+        }
+
         ArgumentException.ThrowIfNullOrWhiteSpace(linuxAbsoluteFilePath);
         if (linuxAbsoluteFilePath[0] != '/')
         {
@@ -416,9 +478,11 @@ internal static class WslTextFileReader
 
     private static string BuildMessage(
         string distroName,
-        string linuxAbsoluteFilePath,
+        string? linuxAbsoluteFilePath,
         string failure) =>
-        $"Unable to read WSL text file; distro='{distroName}'; path='{linuxAbsoluteFilePath}'; {failure}.";
+        linuxAbsoluteFilePath is null
+            ? $"WSL distro '{distroName}' did not become ready; {failure}."
+            : $"Unable to read WSL text file; distro='{distroName}'; path='{linuxAbsoluteFilePath}'; {failure}.";
 
     private static bool IsFatal(Exception exception) =>
         exception is OutOfMemoryException

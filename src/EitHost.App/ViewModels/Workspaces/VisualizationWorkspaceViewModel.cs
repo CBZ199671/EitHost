@@ -661,6 +661,13 @@ public sealed class VisualizationWorkspaceViewModel
         internal set => SetProperty(ref realtimeReconstructionActivity, value);
     }
 
+    private IReadOnlyList<RealtimeDemodulationAxisTick> realtimeRawYAxisTicks = [];
+    public IReadOnlyList<RealtimeDemodulationAxisTick> RealtimeRawYAxisTicks
+    {
+        get => realtimeRawYAxisTicks;
+        internal set => SetProperty(ref realtimeRawYAxisTicks, value);
+    }
+
     public string RealtimeRawWaveStats
     {
         get => realtimeRawWaveStats;

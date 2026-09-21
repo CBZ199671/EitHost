@@ -112,7 +112,7 @@ Every archive carries a `SHA256SUMS.txt` covering each packaged file, and every 
 
 The copy of `release/EitHost-Windows-x64` in this repository holds the package's supporting files and checksums but not the executable: the self-contained EXE exceeds GitHub's 100 MiB file limit, so it ships as a release asset, and a source build reproduces it.
 
-After completing project changes and relevant checks, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-eithost.ps1`. It rebuilds the current source into the single `release/EitHost-Windows-x64` installation while preserving `Data`. The version comes from the application project; dated release directories are no longer created by default. See the [project release policy](packaging/RELEASE-RULES.md).
+After changes affecting the application, runtime configuration, or build/package workflow pass relevant checks, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-eithost.ps1`. It rebuilds the current source into the single `release/EitHost-Windows-x64` installation while preserving `Data`. The version comes from the application project; dated release directories are no longer created by default. Documentation, comment, and agent-instruction-only changes need only the checks appropriate to their impact. See the [project release policy](packaging/RELEASE-RULES.md).
 
 ### Build from source
 

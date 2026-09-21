@@ -971,6 +971,11 @@ public sealed class ExperimentWorkspaceViewModel : WorkspaceViewModelBase, IExpe
             return;
         }
 
+        if (runLifecycleController?.UsePublishedOfflineComplete(run.ExperimentRunId, run.SetLabel) == true)
+        {
+            return;
+        }
+
         var coverage = experimentCatalog.GetCoverage(run.ExperimentRunId);
         var preflight = runLifecycleController?.PreflightOfflineComplete(run.ExperimentRunId) ??
             new OfflineCompletePreflight(

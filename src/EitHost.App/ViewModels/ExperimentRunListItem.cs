@@ -42,6 +42,7 @@ public sealed class ExperimentRunListItem
     public string SetLabel { get; }
 
     public DateTimeOffset StartedAt { get; }
+    public DateTime LocalStartedAt => StartedAt.LocalDateTime;
 
     public ExperimentRunRecord? Run { get; }
 
@@ -81,6 +82,11 @@ public sealed class ExperimentRunListItem
 
     public string Title => $"{(Pseudo3dMember is { } member ? (member.Slot == 0 ? "下层 · " : "上层 · ") : "")}{SetLabel}  {StartedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}";
 
+    public string OperatorSummary => Run is { } run
+        ? $"采集{TranslateStatus(run.Status)} · 解调 {Coverage.DemodReadyCount} · 已保存图像 {Coverage.ReconstructionReadyCount}" +
+          (Coverage.ReconstructionPendingCount > 0 ? $" · 待处理 {Coverage.ReconstructionPendingCount}" : string.Empty)
+        : "历史记录，可选择后查看回放";
+
     public string StateLine => Run is { } run
         ? $"状态 {TranslateStatus(run.Status)} · raw {TranslateStatus(run.RawStatus)} · 解调 {TranslateStatus(run.DemodStatus)} · 重构 {TranslateStatus(run.ReconstructionStatus)}" +
           (string.Equals(
@@ -119,10 +125,10 @@ public sealed class ExperimentRunListItem
     }
 
     public string ReplayLine => IsPseudo3d
-        ? $"伪三维组采集回放 · 解调 {Coverage.DemodReadyCount} · 二维重构 {Coverage.ReconstructionReadyCount} · 选择任一层查看同组双层/三维回放"
+        ? "选择任一层，查看双层已保存图像。"
         : Run is not null
         ? Coverage.DemodReadyCount > 0
-            ? $"规范 HDF5 数据已保存 · 解调 {Coverage.DemodReadyCount} · 重构 {Coverage.ReconstructionReadyCount} · 请选择已发布线路；无线路时生成离线完整回放"
+            ? "选择记录查看回放；需要完整结果时生成离线回放。"
             : "尚无可回放解调块；原始数据仍可检查或离线补算"
         : ImagingRun is { } imaging
             ? $"旧库只读回放 · 帧 {imaging.Summary.FrameCount} · 重构 {imaging.Summary.ReconCount}"

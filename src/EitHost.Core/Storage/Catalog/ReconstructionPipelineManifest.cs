@@ -167,6 +167,8 @@ public sealed record OfflinePipelineReadiness(
 public static class ReconstructionPipelineManifestCodec
 {
     public const string CurrentSchemaVersion = "reconstruction-pipeline-v1";
+    private const string LegacyMissingLiveWeightsReason =
+        "存在缺失的时序前诊断权重；禁止回退为 all-one 权重。";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -232,7 +234,14 @@ public static class ReconstructionPipelineManifestCodec
             return OfflinePipelineReadiness.Unavailable($"算法清单无效：{ex.Message}");
         }
 
-        if (!string.Equals(record.Status, ReconstructionPipelineManifestStatus.Ready, StringComparison.Ordinal))
+        // V675: offline contact weights are rebuilt from full-complex observations
+        // and exact formal-reference candidates. Older finalizers incorrectly made
+        // missing live weights (normal during provisional preview) a permanent veto.
+        // Re-evaluate only that known legacy verdict; retain the signed inventory.
+        var legacyLiveWeightVeto =
+            record.Status == ReconstructionPipelineManifestStatus.Unavailable &&
+            record.UnavailableReason == LegacyMissingLiveWeightsReason;
+        if (record.Status != ReconstructionPipelineManifestStatus.Ready && !legacyLiveWeightVeto)
         {
             return OfflinePipelineReadiness.Unavailable(
                 record.UnavailableReason ?? $"算法清单尚未就绪：{record.Status}。");
@@ -257,12 +266,6 @@ public static class ReconstructionPipelineManifestCodec
         if (inputs.ReferenceEpochCount == 0)
         {
             return OfflinePipelineReadiness.Unavailable("实验没有已落盘的参考帧 epoch。");
-        }
-
-        if (!inputs.AllDemodBlocksHaveDiagnosticsWeights || !payload.Weighting.PersistPreTemporalWeights)
-        {
-            return OfflinePipelineReadiness.Unavailable(
-                "存在缺失的时序前诊断权重；禁止回退为 all-one 权重。");
         }
 
         if (!inputs.AllReferenceEpochsHaveNoisePrecision || !payload.Reference.PersistNoisePrecisionWeights)

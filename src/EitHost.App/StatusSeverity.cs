@@ -51,6 +51,9 @@ internal static class StatusSeverityClassifier
             return StatusSeverity.Info;
         }
 
+        // Feature names and zero failure counters are not incidents.
+        message = message.Replace("异常值", "接触", StringComparison.Ordinal);
+        message = System.Text.RegularExpressions.Regex.Replace(message, @"失败\s*[:：]?\s*0(?![\d.a-zA-Z])", string.Empty);
         foreach (var marker in ErrorMarkers)
         {
             if (message.Contains(marker, StringComparison.Ordinal))

@@ -10,6 +10,7 @@ internal sealed class RealtimeDiagnosticSink
     private readonly ExperimentCatalog catalog;
     private readonly string globalLogPath;
     private readonly Dictionary<Guid, string> activeRunLogPaths = [];
+    internal string GlobalLogPath => globalLogPath;
 
     internal RealtimeDiagnosticSink(
         DataRootLayout layout,

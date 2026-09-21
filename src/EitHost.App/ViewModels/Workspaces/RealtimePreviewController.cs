@@ -65,6 +65,7 @@ internal sealed class RealtimePreviewController
     internal void ResetPresentation()
     {
         workspace.RealtimeRawWaveStats = "等待采集数据";
+        workspace.RealtimeRawYAxisTicks = [];
         workspace.RealtimeDemodStats = "等待解调数据";
         workspace.RealtimePreviewPresenter.ClearDemod();
         workspace.RealtimeBoundaryStats = "等待边界电压";
@@ -367,7 +368,8 @@ internal sealed class RealtimePreviewController
         return new RealtimeRawPreviewSnapshot(
             CreateSeriesGeometry(channel1, range.Min, range.Max),
             null,
-            $"{preview.SetLabel} buffer · AD {FormatAdRangeLabel(acquisition.Range)} · CH1 V1-V2 · {channel1.Length}/{windowSamples} pts · 实测 {range.Min:F4}~{range.Max:F4} V");
+            $"{preview.SetLabel} buffer · AD {FormatAdRangeLabel(acquisition.Range)} · CH1 V1-V2 · {channel1.Length}/{windowSamples} pts · 实测 {range.Min:F4}~{range.Max:F4} V",
+            RealtimeVisualizationProjection.CreateRangeTicks(range.Min, range.Max));
     }
 
     internal void RefreshSignalFromCache(string? setLabel)
@@ -735,7 +737,8 @@ internal sealed class RealtimePreviewController
             $"激励 E{selection.StimulationChannelOneBased} {(selection.IsDiagnosticOnly ? "诊断" : "稳定")} " +
             $"{channel1.Length}/{selection.NominalSampleCount} pts · " +
             $"裁剪 {selection.LeadingDiscardSamples}/{selection.TrailingDiscardSamples} · " +
-            $"实测 {range.Min:F4}~{range.Max:F4} V");
+            $"实测 {range.Min:F4}~{range.Max:F4} V",
+            RealtimeVisualizationProjection.CreateRangeTicks(range.Min, range.Max));
     }
 
     private static double[] ExtractChannelVoltageWindow(

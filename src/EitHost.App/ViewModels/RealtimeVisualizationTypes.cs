@@ -9,7 +9,8 @@ namespace EitHost.App.ViewModels;
 internal sealed record RealtimeRawPreviewSnapshot(
     Geometry? Channel1Geometry,
     Geometry? Channel2Geometry,
-    string Stats);
+    string Stats,
+    IReadOnlyList<RealtimeDemodulationAxisTick>? AxisTicks = null);
 
 internal sealed record RealtimeSignalPreviewSource(
     int BlockNumber,

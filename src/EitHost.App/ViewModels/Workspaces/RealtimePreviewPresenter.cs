@@ -11,6 +11,7 @@ internal sealed class RealtimePreviewPresenter(VisualizationWorkspaceViewModel w
         if (cache is null)
         {
             workspace.RealtimeRawWaveStats = "等待采集数据";
+            workspace.RealtimeRawYAxisTicks = [];
             workspace.RealtimeDemodStats = CreateEmptyDemodSummary(signalViewMode);
             workspace.RealtimeBoundaryStats = "等待边界电压";
             workspace.RealtimeImageStats = "重构图像：无。";
@@ -45,12 +46,14 @@ internal sealed class RealtimePreviewPresenter(VisualizationWorkspaceViewModel w
             workspace.RealtimeRawChannel1Geometry = raw.Channel1Geometry;
             workspace.RealtimeRawChannel2Geometry = raw.Channel2Geometry;
             workspace.RealtimeRawWaveStats = raw.Stats;
+            workspace.RealtimeRawYAxisTicks = raw.AxisTicks ?? [];
         }
         else
         {
             workspace.RealtimeRawChannel1Geometry = null;
             workspace.RealtimeRawChannel2Geometry = null;
             workspace.RealtimeRawWaveStats = "等待采集数据";
+            workspace.RealtimeRawYAxisTicks = [];
         }
 
         if (cache.SignalSource is { } source)
@@ -125,6 +128,7 @@ internal sealed class RealtimePreviewPresenter(VisualizationWorkspaceViewModel w
             workspace.RealtimeRawChannel1Geometry = raw.Channel1Geometry;
             workspace.RealtimeRawChannel2Geometry = raw.Channel2Geometry;
             workspace.RealtimeRawWaveStats = raw.Stats;
+            workspace.RealtimeRawYAxisTicks = raw.AxisTicks ?? [];
         }
 
         if (pending.Demod is { } demod)

@@ -36,6 +36,11 @@ internal static class RealtimeFrameDiagnosticFactory
                 contactResult?.ImageQualityScore ?? degradedSelection.ImageQualityCap,
                 degradedSelection.ImageQualityCap);
         var persistFullComplex = config.StoragePolicy.PersistFullComplex256;
+        var baseWeights = RealtimeBaseMeasurementWeights.Resolve(
+            state.ReferenceIsProvisional,
+            config.EnableOutlierCompensation,
+            degradedSelection?.MeasurementWeight208 ?? activeContactWeights,
+            degradedSelection?.WeightPolicyVersion ?? activeWeightPolicy);
         var record = new ImagingFrameRecord(
             ImagingRunId: config.ImagingRunId,
             BlockNumber: block.BlockNumber,
@@ -55,8 +60,8 @@ internal static class RealtimeFrameDiagnosticFactory
             MeanFullImaginary256: persistFullComplex
                 ? diagnosticAverage?.FlattenFullImaginaryRowMajor() ?? block.MeanFullImaginary256
                 : null,
-            MeasurementWeight208: degradedSelection?.MeasurementWeight208 ?? activeContactWeights,
-            WeightPolicyVersion: degradedSelection?.WeightPolicyVersion ?? activeWeightPolicy ?? "all-one-v1",
+            MeasurementWeight208: baseWeights.Values,
+            WeightPolicyVersion: baseWeights.PolicyVersion,
             ImageQualityScore: persistedImageQuality,
             ElectrodeScores: contactResult?.Scores,
             FaultConfidence: contactResult?.FaultConfidence,
