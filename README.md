@@ -1,7 +1,7 @@
 # EitHost
 
 <p align="right">
-  <strong>English</strong> | <a href="README.zh-CN.md">Simplified Chinese</a>
+  <strong>English</strong> | <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
